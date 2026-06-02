@@ -96,7 +96,7 @@ public class ChatHelperHook {
                             module.log(Log.ERROR, TAG, "Error in onCreateOptionsMenu hook", t);
                         }
                         return result;
-                    }));
+                    });
                     module.log(Log.INFO, TAG, "Hooked onCreateOptionsMenu (param count: "
                             + params.length + ", menu at index " + menuParamIndex + ")");
             } catch (Throwable t) {
