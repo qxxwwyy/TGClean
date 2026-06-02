@@ -65,18 +65,51 @@ public class FilterConfig {
      */
     private SharedPreferences openWritablePrefs() {
         try {
-            // LSPosed 存储路径: /data/misc/lspd/prefs/<module_pkg>/<pref_name>
-            java.io.File prefsFile = new java.io.File(
-                    "/data/misc/lspd/prefs/com.tgclean/" + PREFS_NAME);
-            if (!prefsFile.exists()) {
-                // 尝试备选路径（部分 LSPosed 版本）
-                prefsFile = new java.io.File(
-                        "/data/adb/lspd/prefs/com.tgclean/" + PREFS_NAME);
+            // 探测所有可能的 LSPosed prefs 路径
+            String[] candidates = {
+                "/data/misc/lspd/prefs/com.tgclean/" + PREFS_NAME,
+                "/data/misc/lspd/prefs/com.tgclean/" + PREFS_NAME + ".xml",
+                "/data/adb/lspd/prefs/com.tgclean/" + PREFS_NAME,
+                "/data/adb/lspd/prefs/com.tgclean/" + PREFS_NAME + ".xml",
+                // 有些 LSPosed 版本用 uid 目录
+                "/data/misc/lspd/prefs/" + android.os.Process.myUid() + "/" + PREFS_NAME,
+                "/data/misc/lspd/prefs/" + android.os.Process.myUid() + "/" + PREFS_NAME + ".xml",
+                "/data/adb/lspd/prefs/" + android.os.Process.myUid() + "/" + PREFS_NAME,
+                "/data/adb/lspd/prefs/" + android.os.Process.myUid() + "/" + PREFS_NAME + ".xml",
+            };
+
+            java.io.File prefsFile = null;
+            for (String path : candidates) {
+                java.io.File f = new java.io.File(path);
+                module.log(Log.INFO, TAG, "Checking: " + path + " exists=" + f.exists());
+                if (f.exists()) {
+                    prefsFile = f;
+                    break;
+                }
             }
-            if (!prefsFile.exists()) {
-                module.log(Log.ERROR, TAG, "Prefs file not found, write will fail");
+
+            // 如果常规路径找不到，递归搜索
+            if (prefsFile == null) {
+                java.io.File lspdDir = new java.io.File("/data/misc/lspd");
+                if (lspdDir.exists()) {
+                    module.log(Log.INFO, TAG, "Searching /data/misc/lspd recursively...");
+                    prefsFile = findPrefsFile(lspdDir, PREFS_NAME);
+                }
+                if (prefsFile == null) {
+                    java.io.File adbDir = new java.io.File("/data/adb/lspd");
+                    if (adbDir.exists()) {
+                        module.log(Log.INFO, TAG, "Searching /data/adb/lspd recursively...");
+                        prefsFile = findPrefsFile(adbDir, PREFS_NAME);
+                    }
+                }
+            }
+
+            if (prefsFile == null) {
+                module.log(Log.ERROR, TAG, "Prefs file not found in any location, write will fail");
                 return prefs; // fallback to read-only
             }
+
+            module.log(Log.INFO, TAG, "Found writable prefs at: " + prefsFile.getAbsolutePath());
             Class<?> spImpl = Class.forName("android.app.SharedPreferencesImpl");
             java.lang.reflect.Constructor<?> ctor = spImpl.getDeclaredConstructor(
                     java.io.File.class, int.class);
@@ -86,6 +119,22 @@ public class FilterConfig {
             module.log(Log.ERROR, TAG, "Failed to open writable prefs", t);
             return prefs; // fallback to read-only
         }
+    }
+
+    /** 递归搜索 prefs 文件 */
+    private static java.io.File findPrefsFile(java.io.File dir, String name) {
+        java.io.File[] files = dir.listFiles();
+        if (files == null) return null;
+        for (java.io.File f : files) {
+            if (f.isFile() && (f.getName().equals(name) || f.getName().equals(name + ".xml"))) {
+                return f;
+            }
+            if (f.isDirectory()) {
+                java.io.File found = findPrefsFile(f, name);
+                if (found != null) return found;
+            }
+        }
+        return null;
     }
 
     /**
