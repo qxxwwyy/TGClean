@@ -74,7 +74,7 @@ public class FilterConfig {
     }
 
     public void setEnabled(boolean enabled) {
-        wp().edit().putBoolean(KEY_ENABLED, enabled).apply();
+        prefs.edit().putBoolean(KEY_ENABLED, enabled).apply();
     }
 
     public boolean isUseRegex() {
@@ -82,7 +82,7 @@ public class FilterConfig {
     }
 
     public void setUseRegex(boolean useRegex) {
-        wp().edit().putBoolean(KEY_USE_REGEX, useRegex).apply();
+        prefs.edit().putBoolean(KEY_USE_REGEX, useRegex).apply();
     }
 
     // ═════════════════════════════════════════════
@@ -104,7 +104,7 @@ public class FilterConfig {
     }
 
     public void setGlobalKeywords(Set<String> keywords) {
-        wp().edit().putString(KEY_GLOBAL_KEYWORDS, joinLines(keywords)).apply();
+        prefs.edit().putString(KEY_GLOBAL_KEYWORDS, joinLines(keywords)).apply();
     }
 
     public void addGlobalKeyword(String keyword) {
@@ -274,7 +274,7 @@ public class FilterConfig {
     }
 
     public void setReactionsFilterEnabled(boolean enabled) {
-        wp().edit().putBoolean(KEY_REACTIONS_ENABLED, enabled).apply();
+        prefs.edit().putBoolean(KEY_REACTIONS_ENABLED, enabled).apply();
     }
 
     public String getReactionsFilterEmoji() {
@@ -282,7 +282,7 @@ public class FilterConfig {
     }
 
     public void setReactionsFilterEmoji(String emoji) {
-        wp().edit().putString(KEY_REACTIONS_EMOJI, emoji).apply();
+        prefs.edit().putString(KEY_REACTIONS_EMOJI, emoji).apply();
     }
 
     public int getReactionsFilterThreshold() {
@@ -290,7 +290,7 @@ public class FilterConfig {
     }
 
     public void setReactionsFilterThreshold(int threshold) {
-        wp().edit().putInt(KEY_REACTIONS_THRESHOLD, threshold).apply();
+        prefs.edit().putInt(KEY_REACTIONS_THRESHOLD, threshold).apply();
     }
 
     // ═════════════════════════════════════════════
@@ -299,7 +299,7 @@ public class FilterConfig {
 
     private void saveChannelRules(Map<Long, Set<String>> rules) {
         if (rules.isEmpty()) {
-            wp().edit().putString(KEY_CHANNEL_RULES, "").apply();
+            prefs.edit().putString(KEY_CHANNEL_RULES, "").apply();
             return;
         }
         try {
@@ -311,7 +311,7 @@ public class FilterConfig {
                 }
                 json.put(String.valueOf(entry.getKey()), arr);
             }
-            wp().edit().putString(KEY_CHANNEL_RULES, json.toString()).apply();
+            prefs.edit().putString(KEY_CHANNEL_RULES, json.toString()).apply();
         } catch (JSONException e) {
             module.log(Log.ERROR, TAG, "Failed to serialize channel rules", e);
         }
@@ -367,14 +367,14 @@ public class FilterConfig {
 
     private void saveWhitelist(Set<Long> whitelist) {
         if (whitelist.isEmpty()) {
-            wp().edit().putString(KEY_WHITELIST, "").apply();
+            prefs.edit().putString(KEY_WHITELIST, "").apply();
             return;
         }
         JSONArray arr = new JSONArray();
         for (Long id : whitelist) {
             arr.put(id);
         }
-        wp().edit().putString(KEY_WHITELIST, arr.toString()).apply();
+        prefs.edit().putString(KEY_WHITELIST, arr.toString()).apply();
     }
 
     private Set<Long> parseWhitelistJson(String raw) {
