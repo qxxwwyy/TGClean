@@ -364,15 +364,11 @@ public class FilterConfig {
             prefs.edit().putString(KEY_WHITELIST, "").apply();
             return;
         }
-        try {
-            JSONArray arr = new JSONArray();
-            for (Long id : whitelist) {
-                arr.put(id);
-            }
-            prefs.edit().putString(KEY_WHITELIST, arr.toString()).apply();
-        } catch (JSONException e) {
-            module.log(Log.ERROR, TAG, "Failed to serialize whitelist", e);
+        JSONArray arr = new JSONArray();
+        for (Long id : whitelist) {
+            arr.put(id);
         }
+        prefs.edit().putString(KEY_WHITELIST, arr.toString()).apply();
     }
 
     private Set<Long> parseWhitelistJson(String raw) {
