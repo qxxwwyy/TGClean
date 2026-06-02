@@ -34,25 +34,19 @@ public class ChatHelperHook {
         try {
             Class<?> chatActivityClass = cl.loadClass("org.telegram.ui.ChatActivity");
 
-            Method[] methods = chatActivityClass.getDeclaredMethods();
-            int hookedCount = 0;
-            for (Method m : methods) {
-                if (!"onCreateOptionsMenu".equals(m.getName())) continue;
-                Class<?>[] params = m.getParameterTypes();
-                boolean hasMenu = false;
-                for (Class<?> p : params) {
-                    if (Menu.class.isAssignableFrom(p)) {
-                        hasMenu = true;
-                        break;
-                    }
-                }
-                if (!hasMenu) continue;
+            // 遍历继承链查找 onCreateOptionsMenu（exteraGram 可能在父类 BaseFragment 中）
+            Method target = findMethodInHierarchy(chatActivityClass, "onCreateOptionsMenu");
+            if (target == null) {
+                module.log(Log.WARN, TAG, "onCreateOptionsMenu not found in ChatActivity hierarchy");
+                return;
+            }
 
-                final int menuParamIndex = findMenuParamIndex(params);
+            Class<?>[] params = target.getParameterTypes();
+            final int menuParamIndex = findMenuParamIndex(params);
 
-                try {
-                    m.setAccessible(true);
-                    module.hook(m).intercept(chain -> {
+            try {
+                target.setAccessible(true);
+                module.hook(target).intercept(chain -> {
                         Object result = chain.proceed();
                         try {
                             Object chatActivity = chain.getThisObject();
@@ -102,18 +96,12 @@ public class ChatHelperHook {
                             module.log(Log.ERROR, TAG, "Error in onCreateOptionsMenu hook", t);
                         }
                         return result;
-                    });
-                    hookedCount++;
+                    }));
                     module.log(Log.INFO, TAG, "Hooked onCreateOptionsMenu (param count: "
                             + params.length + ", menu at index " + menuParamIndex + ")");
-                } catch (Throwable t) {
-                    module.log(Log.WARN, TAG, "Failed to hook onCreateOptionsMenu variant: "
-                            + t.getMessage());
-                }
-            }
-
-            if (hookedCount == 0) {
-                module.log(Log.WARN, TAG, "onCreateOptionsMenu not found in ChatActivity");
+            } catch (Throwable t) {
+                module.log(Log.WARN, TAG, "Failed to hook onCreateOptionsMenu: "
+                        + t.getMessage());
             }
 
         } catch (Throwable t) {
@@ -226,6 +214,34 @@ public class ChatHelperHook {
             } catch (NoSuchFieldException e) {
                 clazz = clazz.getSuperclass();
             }
+        }
+        return null;
+    }
+
+    private static Method findMethodInHierarchy(Class<?> clazz, String name, Class<?>... paramTypes) {
+        while (clazz != null && clazz != Object.class) {
+            try {
+                return clazz.getDeclaredMethod(name, paramTypes);
+            } catch (NoSuchMethodException e) {
+                clazz = clazz.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 在继承链中按方法名查找，并从所有重载中选出参数包含 Menu 的那个
+     */
+    private static Method findMethodInHierarchy(Class<?> clazz, String name) {
+        while (clazz != null && clazz != Object.class) {
+            for (Method m : clazz.getDeclaredMethods()) {
+                if (name.equals(m.getName())) {
+                    for (Class<?> p : m.getParameterTypes()) {
+                        if (Menu.class.isAssignableFrom(p)) return m;
+                    }
+                }
+            }
+            clazz = clazz.getSuperclass();
         }
         return null;
     }
