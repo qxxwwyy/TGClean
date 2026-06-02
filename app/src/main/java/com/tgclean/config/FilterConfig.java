@@ -42,16 +42,12 @@ public class FilterConfig {
     private static final String KEY_REACTIONS_THRESHOLD = "reactions_filter_threshold";
 
     private final XposedModule module;
-    private final SharedPreferences prefs;         // RemotePreferences（只读，用于读取）
-    private final SharedPreferences writablePrefs; // 直接操作文件（可写，用于写入）
+    private final SharedPreferences prefs;
     private final SharedPreferences.OnSharedPreferenceChangeListener prefChangeListener;
 
     public FilterConfig(XposedModule module) {
         this.module = module;
         this.prefs = module.getRemotePreferences(PREFS_NAME);
-
-        // LSPosed RemotePreferences 是只读的，写入需要直接操作文件
-        this.writablePrefs = openWritablePrefs();
 
         this.prefChangeListener = (sharedPreferences, key) -> {
             module.log(Log.INFO, TAG, "Config changed: " + key);
@@ -59,90 +55,11 @@ public class FilterConfig {
         prefs.registerOnSharedPreferenceChangeListener(prefChangeListener);
     }
 
-    /**
-     * 打开可写的 SharedPreferences（LSPosed prefs 文件路径）
-     * RemotePreferences 是只读跨进程副本，写入需直接操作底层文件
-     */
-    private SharedPreferences openWritablePrefs() {
-        try {
-            // 探测所有可能的 LSPosed prefs 路径
-            String[] candidates = {
-                "/data/misc/lspd/prefs/com.tgclean/" + PREFS_NAME,
-                "/data/misc/lspd/prefs/com.tgclean/" + PREFS_NAME + ".xml",
-                "/data/adb/lspd/prefs/com.tgclean/" + PREFS_NAME,
-                "/data/adb/lspd/prefs/com.tgclean/" + PREFS_NAME + ".xml",
-                // 有些 LSPosed 版本用 uid 目录
-                "/data/misc/lspd/prefs/" + android.os.Process.myUid() + "/" + PREFS_NAME,
-                "/data/misc/lspd/prefs/" + android.os.Process.myUid() + "/" + PREFS_NAME + ".xml",
-                "/data/adb/lspd/prefs/" + android.os.Process.myUid() + "/" + PREFS_NAME,
-                "/data/adb/lspd/prefs/" + android.os.Process.myUid() + "/" + PREFS_NAME + ".xml",
-            };
-
-            java.io.File prefsFile = null;
-            for (String path : candidates) {
-                java.io.File f = new java.io.File(path);
-                module.log(Log.INFO, TAG, "Checking: " + path + " exists=" + f.exists());
-                if (f.exists()) {
-                    prefsFile = f;
-                    break;
-                }
-            }
-
-            // 如果常规路径找不到，递归搜索
-            if (prefsFile == null) {
-                java.io.File lspdDir = new java.io.File("/data/misc/lspd");
-                if (lspdDir.exists()) {
-                    module.log(Log.INFO, TAG, "Searching /data/misc/lspd recursively...");
-                    prefsFile = findPrefsFile(lspdDir, PREFS_NAME);
-                }
-                if (prefsFile == null) {
-                    java.io.File adbDir = new java.io.File("/data/adb/lspd");
-                    if (adbDir.exists()) {
-                        module.log(Log.INFO, TAG, "Searching /data/adb/lspd recursively...");
-                        prefsFile = findPrefsFile(adbDir, PREFS_NAME);
-                    }
-                }
-            }
-
-            if (prefsFile == null) {
-                module.log(Log.ERROR, TAG, "Prefs file not found in any location, write will fail");
-                return prefs; // fallback to read-only
-            }
-
-            module.log(Log.INFO, TAG, "Found writable prefs at: " + prefsFile.getAbsolutePath());
-            Class<?> spImpl = Class.forName("android.app.SharedPreferencesImpl");
-            java.lang.reflect.Constructor<?> ctor = spImpl.getDeclaredConstructor(
-                    java.io.File.class, int.class);
-            ctor.setAccessible(true);
-            return (SharedPreferences) ctor.newInstance(prefsFile, 0);
-        } catch (Throwable t) {
-            module.log(Log.ERROR, TAG, "Failed to open writable prefs", t);
-            return prefs; // fallback to read-only
-        }
-    }
-
-    /** 递归搜索 prefs 文件 */
-    private static java.io.File findPrefsFile(java.io.File dir, String name) {
-        java.io.File[] files = dir.listFiles();
-        if (files == null) return null;
-        for (java.io.File f : files) {
-            if (f.isFile() && (f.getName().equals(name) || f.getName().equals(name + ".xml"))) {
-                return f;
-            }
-            if (f.isDirectory()) {
-                java.io.File found = findPrefsFile(f, name);
-                if (found != null) return found;
-            }
-        }
-        return null;
-    }
-
-    /**
-     * 获取可写 SharedPreferences（写入操作必须用这个）
-     */
-    private SharedPreferences wp() {
-        return writablePrefs;
-    }
+    // ═════════════════════════════════════════════
+    // 注意：hook 端（Telegram 进程）RemotePreferences 是只读的
+    // 所有写入操作（add/remove/set）必须在 App 端通过
+    // XposedService.getRemotePreferences().edit() 执行
+    // ═════════════════════════════════════════════
 
     // ═════════════════════════════════════════════
     // 基础读写

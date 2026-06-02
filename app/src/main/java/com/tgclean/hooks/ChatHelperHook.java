@@ -12,22 +12,15 @@ import java.lang.reflect.Method;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * ChatActivity 菜单注入 — "🧹 过滤设置"
+ * ChatActivity 菜单注入 — "📋 复制聊天ID"
  *
- * exteraGram 不使用标准 Android onCreateOptionsMenu，
- * 而是用 ActionBarMenuItem.lazilyAddSubItem() 构建菜单。
- *
- * hook 策略：
- * 1. hook ChatActivity.onResume() —— 此时 headerItem 已初始化
- * 2. 反射获取 headerItem 字段（ActionBarMenuItem）
- * 3. 用 headerItem.addSubItem() 返回 ActionBarMenuSubItem（View）
- * 4. 对返回的 subItem 设置 setTag + setOnClickListener 覆盖默认行为
+ * 注入一个菜单项到 ChatActivity 的 ActionBar 菜单，
+ * 方便用户获取 dialogId 用于在 TGClean App 中配置分频道规则。
  */
 public class ChatHelperHook {
     private static final String TAG = "TGClean-ChatHelper";
 
     // 自定义菜单 ID（避免与 Telegram 内部 ID 冲突）
-    private static final int MENU_ID_FILTER_SETTINGS = 999001;
     private static final int MENU_ID_COPY_CHAT_ID = 999002;
 
     // 标记 tag，防止重复注入
@@ -105,29 +98,13 @@ public class ChatHelperHook {
             }
             addSubItem.setAccessible(true);
 
-            // 1. 过滤设置
-            Object filterItem = addSubItem.invoke(headerItem, MENU_ID_FILTER_SETTINGS, 0,
-                    "🧹 过滤设置 (" + channelName + ")");
-            View filterView = (View) filterItem;
-            filterView.setOnClickListener(v -> {
-                // 延迟调用确保 UI 线程
-                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
-                    try {
-                        com.tgclean.ui.TGCleanSheet.showChannelSheet(
-                                context, dialogId, accountIdx, channelName);
-                    } catch (Throwable t) {
-                        Log.e(TAG, "Failed to open TGCleanSheet", t);
-                    }
-                });
-            });
-
-            // 2. 复制聊天 ID
+            // 复制聊天 ID（方便用户在 TGClean App 中配置分频道规则）
             Object copyItem = addSubItem.invoke(headerItem, MENU_ID_COPY_CHAT_ID, 0,
                     "📋 复制聊天ID (" + dialogId + ")");
             View copyView = (View) copyItem;
             copyView.setOnClickListener(v -> showAndCopyDialogId(context, dialogId));
 
-            module.log(Log.INFO, TAG, "Injected menu items (dialogId=" + dialogId
+            module.log(Log.INFO, TAG, "Injected copy-chat-ID menu (dialogId=" + dialogId
                     + ", channel=" + channelName + ")");
 
         } catch (Throwable t) {
