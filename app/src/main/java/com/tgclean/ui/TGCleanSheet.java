@@ -149,7 +149,7 @@ public class TGCleanSheet {
         }
         try {
             cTheme = tgClassLoader.loadClass("org.telegram.ui.ActionBar.Theme");
-            cAndroidUtilities = tgClassLoader.loadClass("org.telegram.ui.Components.AndroidUtilities");
+            cAndroidUtilities = tgClassLoader.loadClass("org.telegram.messenger.AndroidUtilities");
             cMessagesController = tgClassLoader.loadClass("org.telegram.messenger.MessagesController");
             cDialogObject = tgClassLoader.loadClass("org.telegram.messenger.DialogObject");
             cTLRPCDialog = tgClassLoader.loadClass("org.telegram.tgnet.TLRPC$TL_dialog");
