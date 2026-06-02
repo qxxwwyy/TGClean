@@ -3,15 +3,14 @@ package com.tgclean.hooks;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ComponentName;
-import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
-import android.net.Uri;
 import android.util.Log;
 import android.view.View;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.List;
 
 import io.github.libxposed.api.XposedModule;
 
@@ -19,8 +18,8 @@ import io.github.libxposed.api.XposedModule;
  * ChatActivity Hook — 菜单注入 + 频道自动发现
  *
  * 1. 注入「📋 复制聊天ID」菜单项
- * 2. 每次 onResume 时通过 BroadcastReceiver 发送频道信息到 TGClean App
- *    （component-explicit broadcast，绕过 Android 11+ package visibility 限制）
+ * 2. 首次 onResume 时一次性扫描 TG 全部频道列表，批量广播到 TGClean App
+ * 3. 后续 onResume 只增量更新当前频道
  */
 public class ChatHelperHook {
     private static final String TAG = "TGClean-ChatHelper";
@@ -41,6 +40,9 @@ public class ChatHelperHook {
     private static volatile long lastReportedDialogId = 0;
     private static volatile long lastReportTime = 0;
     private static final long REPORT_COOLDOWN_MS = 30_000;
+
+    // 首次全量扫描标记（per account）
+    private static volatile boolean scannedAllChannels = false;
 
     public static void hook(ClassLoader cl, XposedModule module) {
         try {
@@ -68,9 +70,15 @@ public class ChatHelperHook {
                     if (dialogId == 0) return null;
 
                     int accountIdx = getCurrentAccount(chatActivity, tgCl);
-                    String channelName = resolveChannelName(dialogId, accountIdx, tgCl);
 
-                    // 自动上报频道信息到 TGClean App（广播）
+                    // 首次触发：一次性扫描 TG 全部频道
+                    if (!scannedAllChannels) {
+                        scanAllChannels(context, accountIdx, tgCl, module);
+                        scannedAllChannels = true;
+                    }
+
+                    // 增量上报当前频道
+                    String channelName = resolveChannelName(dialogId, accountIdx, tgCl);
                     reportChannelViaBroadcast(context, dialogId, channelName);
 
                     // 注入菜单
@@ -89,28 +97,98 @@ public class ChatHelperHook {
     }
 
     /**
-     * 通过 Component-explicit broadcast 发送频道信息到 TGClean App
+     * 一次性扫描 Telegram 全部频道列表，批量发送到 TGClean App
      *
-     * Component-explicit broadcast 不受 Android 11+ package visibility 限制，
-     * 因为 AMS 内部使用 MATCH_ALL 查询 component。
+     * 通过反射读取 MessagesController.dialogsChannelsOnly（ArrayList<TLRPC.Dialog>），
+     * 遍历每个 Dialog.id，用 DialogObject.getName() 获取频道名，逐个发广播。
+     */
+    private static void scanAllChannels(Context context, int accountIdx,
+                                        ClassLoader cl, XposedModule module) {
+        try {
+            // 获取 MessagesController 单例
+            Class<?> mcClass = cl.loadClass("org.telegram.messenger.MessagesController");
+            Method getInstance = mcClass.getMethod("getInstance", int.class);
+            Object mc = getInstance.invoke(null, accountIdx);
+
+            // 读取 dialogsChannelsOnly 字段
+            Field channelsField = findFieldInHierarchy(mcClass, "dialogsChannelsOnly");
+            if (channelsField == null) {
+                module.log(Log.WARN, TAG, "dialogsChannelsOnly field not found");
+                return;
+            }
+            channelsField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            List<?> channels = (List<?>) channelsField.get(mc);
+
+            if (channels == null || channels.isEmpty()) {
+                module.log(Log.INFO, TAG, "dialogsChannelsOnly is empty");
+                return;
+            }
+
+            // 加载 DialogObject
+            Class<?> dialogObjClass = cl.loadClass("org.telegram.messenger.DialogObject");
+            Method getName = dialogObjClass.getMethod("getName", int.class, long.class);
+
+            long now = System.currentTimeMillis();
+            int count = 0;
+
+            for (Object dialog : channels) {
+                try {
+                    // TLRPC.Dialog.id 是 long 类型
+                    Field idField = findFieldInHierarchy(dialog.getClass(), "id");
+                    if (idField == null) continue;
+                    idField.setAccessible(true);
+                    long dId = idField.getLong(dialog);
+
+                    if (dId == 0) continue;
+
+                    // 获取频道名
+                    String name;
+                    try {
+                        name = (String) getName.invoke(null, accountIdx, dId);
+                    } catch (Throwable t) {
+                        name = String.valueOf(dId);
+                    }
+
+                    // 发送广播
+                    Intent intent = new Intent(ACTION);
+                    intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
+                    intent.putExtra("dialog_id", dId);
+                    intent.putExtra("name", name != null ? name : String.valueOf(dId));
+                    intent.putExtra("last_seen", now);
+                    context.sendBroadcast(intent);
+
+                    count++;
+                } catch (Throwable t) {
+                    // 跳过异常的单个频道
+                }
+            }
+
+            module.log(Log.INFO, TAG, "Batch scan complete: " + count + " channels sent");
+
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "Failed to scan all channels: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 通过 component-explicit broadcast 发送频道信息到 TGClean App
      */
     private static void reportChannelViaBroadcast(Context context, long dialogId, String name) {
         long now = System.currentTimeMillis();
 
-        // 同一频道 30 秒内不重复发送（避免 onResume 频繁触发）
+        // 同一频道 30 秒内不重复发送
         if (dialogId == lastReportedDialogId && (now - lastReportTime) < REPORT_COOLDOWN_MS) {
             return;
         }
 
         try {
             Intent intent = new Intent(ACTION);
-            // 使用 ComponentName 发送显式广播
             intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
             intent.putExtra("dialog_id", dialogId);
             intent.putExtra("name", name != null ? name : String.valueOf(dialogId));
             intent.putExtra("last_seen", now);
 
-            // sendBroadcast 在 TG 进程中发送，AMS 路由到 TGClean App
             context.sendBroadcast(intent);
 
             lastReportedDialogId = dialogId;
