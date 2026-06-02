@@ -140,11 +140,6 @@ public class SettingsActivity extends AppCompatActivity {
             View parent = (View) channelSection.getParent();
             if (parent instanceof LinearLayout) ((LinearLayout) parent).setVisibility(View.GONE);
         }
-        View whitelistSection = findViewById(R.id.edit_whitelist);
-        if (whitelistSection != null) {
-            View parent = (View) whitelistSection.getParent();
-            if (parent instanceof LinearLayout) ((LinearLayout) parent).setVisibility(View.GONE);
-        }
         View pasteBtn = findViewById(R.id.btn_paste_id);
         if (pasteBtn != null) pasteBtn.setVisibility(View.GONE);
     }
