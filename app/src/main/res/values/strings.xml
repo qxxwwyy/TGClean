@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TGClean</string>
+    <string name="app_description">Telegram keyword ad filter with per-channel rules</string>
+
+    <!-- 通用 -->
+    <string name="save_config">保存配置</string>
+    <string name="config_saved">配置已保存，重启 Telegram 生效</string>
+    <string name="save_hint">修改配置后需要强制停止 Telegram 重新打开</string>
+
+    <!-- 总开关 -->
+    <string name="filter_enabled">启用过滤</string>
+    <string name="filter_enabled_desc">关闭后所有过滤功能将停止工作</string>
+
+    <!-- 关键词区段 -->
+    <string name="section_keywords">关键词过滤</string>
+    <string name="use_regex">正则表达式模式</string>
+    <string name="global_keywords_hint">输入关键词</string>
+    <string name="global_keywords_helper">每行一个关键词，匹配到的消息将被隐藏</string>
+
+    <!-- 白名单区段 -->
+    <string name="section_whitelist">白名单</string>
+    <string name="whitelist_hint">对话 ID</string>
+    <string name="whitelist_helper">白名单内的对话不会被过滤，逗号分隔</string>
+
+    <!-- Reactions 区段 -->
+    <string name="reactions_filter">Reactions 过滤</string>
+    <string name="reactions_filter_desc">当消息收到指定表情反应超过阈值时自动隐藏</string>
+    <string name="reactions_emoji_hint">表情</string>
+    <string name="reactions_threshold_hint">阈值</string>
+
+    <!-- 分频道规则区段 -->
+    <string name="section_channel_rules">分频道规则</string>
+    <string name="channel_rules_hint">频道规则</string>
+    <string name="channel_rules_helper">格式：频道ID:关键词1,关键词2，每行一条规则</string>
+    <string name="paste_chat_id">从剪贴板导入聊天ID</string>
+</resources>
