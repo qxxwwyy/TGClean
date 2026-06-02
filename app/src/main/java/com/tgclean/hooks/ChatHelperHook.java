@@ -53,9 +53,7 @@ public class ChatHelperHook {
             Method onResume = chatActivityClass.getDeclaredMethod("onResume");
             onResume.setAccessible(true);
 
-            module.hook(onResume).intercept(chain -> {
-                chain.proceed();
-
+            module.hook(onResume).after(chain -> {
                 try {
                     Object chatActivity = chain.getThisObject();
                     injectIfNeeded(chatActivity, cl, module);
