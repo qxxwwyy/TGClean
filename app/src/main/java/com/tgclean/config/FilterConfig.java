@@ -42,17 +42,57 @@ public class FilterConfig {
     private static final String KEY_REACTIONS_THRESHOLD = "reactions_filter_threshold";
 
     private final XposedModule module;
-    private final SharedPreferences prefs;
+    private final SharedPreferences prefs;         // RemotePreferences（只读，用于读取）
+    private final SharedPreferences writablePrefs; // 直接操作文件（可写，用于写入）
     private final SharedPreferences.OnSharedPreferenceChangeListener prefChangeListener;
 
     public FilterConfig(XposedModule module) {
         this.module = module;
         this.prefs = module.getRemotePreferences(PREFS_NAME);
 
+        // LSPosed RemotePreferences 是只读的，写入需要直接操作文件
+        this.writablePrefs = openWritablePrefs();
+
         this.prefChangeListener = (sharedPreferences, key) -> {
             module.log(Log.INFO, TAG, "Config changed: " + key);
         };
         prefs.registerOnSharedPreferenceChangeListener(prefChangeListener);
+    }
+
+    /**
+     * 打开可写的 SharedPreferences（LSPosed prefs 文件路径）
+     * RemotePreferences 是只读跨进程副本，写入需直接操作底层文件
+     */
+    private SharedPreferences openWritablePrefs() {
+        try {
+            // LSPosed 存储路径: /data/misc/lspd/prefs/<module_pkg>/<pref_name>
+            java.io.File prefsFile = new java.io.File(
+                    "/data/misc/lspd/prefs/com.tgclean/" + PREFS_NAME);
+            if (!prefsFile.exists()) {
+                // 尝试备选路径（部分 LSPosed 版本）
+                prefsFile = new java.io.File(
+                        "/data/adb/lspd/prefs/com.tgclean/" + PREFS_NAME);
+            }
+            if (!prefsFile.exists()) {
+                module.log(Log.ERROR, TAG, "Prefs file not found, write will fail");
+                return prefs; // fallback to read-only
+            }
+            Class<?> spImpl = Class.forName("android.app.SharedPreferencesImpl");
+            java.lang.reflect.Constructor<?> ctor = spImpl.getDeclaredConstructor(
+                    java.io.File.class, int.class);
+            ctor.setAccessible(true);
+            return (SharedPreferences) ctor.newInstance(prefsFile, 0);
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "Failed to open writable prefs", t);
+            return prefs; // fallback to read-only
+        }
+    }
+
+    /**
+     * 获取可写 SharedPreferences（写入操作必须用这个）
+     */
+    private SharedPreferences wp() {
+        return writablePrefs;
     }
 
     // ═════════════════════════════════════════════
@@ -68,7 +108,7 @@ public class FilterConfig {
     }
 
     public void setEnabled(boolean enabled) {
-        prefs.edit().putBoolean(KEY_ENABLED, enabled).apply();
+        wp().edit().putBoolean(KEY_ENABLED, enabled).apply();
     }
 
     public boolean isUseRegex() {
@@ -76,7 +116,7 @@ public class FilterConfig {
     }
 
     public void setUseRegex(boolean useRegex) {
-        prefs.edit().putBoolean(KEY_USE_REGEX, useRegex).apply();
+        wp().edit().putBoolean(KEY_USE_REGEX, useRegex).apply();
     }
 
     // ═════════════════════════════════════════════
@@ -98,7 +138,7 @@ public class FilterConfig {
     }
 
     public void setGlobalKeywords(Set<String> keywords) {
-        prefs.edit().putString(KEY_GLOBAL_KEYWORDS, joinLines(keywords)).apply();
+        wp().edit().putString(KEY_GLOBAL_KEYWORDS, joinLines(keywords)).apply();
     }
 
     public void addGlobalKeyword(String keyword) {
@@ -268,7 +308,7 @@ public class FilterConfig {
     }
 
     public void setReactionsFilterEnabled(boolean enabled) {
-        prefs.edit().putBoolean(KEY_REACTIONS_ENABLED, enabled).apply();
+        wp().edit().putBoolean(KEY_REACTIONS_ENABLED, enabled).apply();
     }
 
     public String getReactionsFilterEmoji() {
@@ -276,7 +316,7 @@ public class FilterConfig {
     }
 
     public void setReactionsFilterEmoji(String emoji) {
-        prefs.edit().putString(KEY_REACTIONS_EMOJI, emoji).apply();
+        wp().edit().putString(KEY_REACTIONS_EMOJI, emoji).apply();
     }
 
     public int getReactionsFilterThreshold() {
@@ -284,7 +324,7 @@ public class FilterConfig {
     }
 
     public void setReactionsFilterThreshold(int threshold) {
-        prefs.edit().putInt(KEY_REACTIONS_THRESHOLD, threshold).apply();
+        wp().edit().putInt(KEY_REACTIONS_THRESHOLD, threshold).apply();
     }
 
     // ═════════════════════════════════════════════
@@ -293,7 +333,7 @@ public class FilterConfig {
 
     private void saveChannelRules(Map<Long, Set<String>> rules) {
         if (rules.isEmpty()) {
-            prefs.edit().putString(KEY_CHANNEL_RULES, "").apply();
+            wp().edit().putString(KEY_CHANNEL_RULES, "").apply();
             return;
         }
         try {
@@ -305,7 +345,7 @@ public class FilterConfig {
                 }
                 json.put(String.valueOf(entry.getKey()), arr);
             }
-            prefs.edit().putString(KEY_CHANNEL_RULES, json.toString()).apply();
+            wp().edit().putString(KEY_CHANNEL_RULES, json.toString()).apply();
         } catch (JSONException e) {
             module.log(Log.ERROR, TAG, "Failed to serialize channel rules", e);
         }
@@ -361,14 +401,14 @@ public class FilterConfig {
 
     private void saveWhitelist(Set<Long> whitelist) {
         if (whitelist.isEmpty()) {
-            prefs.edit().putString(KEY_WHITELIST, "").apply();
+            wp().edit().putString(KEY_WHITELIST, "").apply();
             return;
         }
         JSONArray arr = new JSONArray();
         for (Long id : whitelist) {
             arr.put(id);
         }
-        prefs.edit().putString(KEY_WHITELIST, arr.toString()).apply();
+        wp().edit().putString(KEY_WHITELIST, arr.toString()).apply();
     }
 
     private Set<Long> parseWhitelistJson(String raw) {
