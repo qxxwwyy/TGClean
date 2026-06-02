@@ -1,5 +1,6 @@
 package com.tgclean.config;
 
+import android.content.SharedPreferences;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -379,7 +380,7 @@ public class FilterConfig {
         try {
             JSONArray arr = new JSONArray(raw);
             for (int i = 0; i < arr.length(); i++) {
-                result.put(arr.getLong(i));
+                result.add(arr.getLong(i));
             }
         } catch (JSONException e) {
             module.log(Log.WARN, TAG, "Failed to parse whitelist JSON: " + e.getMessage());
