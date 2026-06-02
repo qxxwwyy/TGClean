@@ -224,30 +224,23 @@ public class TGCleanSheet {
         }
 
         void build() {
-            // 使用模块自己的 Context 创建 BottomSheetDialog，
-            // 避免 AppCompat 资源 ID 与 Telegram 资源表冲突
+            // 使用 Telegram 原生 BottomSheet（org.telegram.ui.ActionBar.BottomSheet）
+            // 继承自 android.app.Dialog，不依赖 AppCompat，无资源冲突
             try {
-                Context moduleContext = context.createPackageContext(
-                        "com.tgclean",
-                        Context.CONTEXT_INCLUDE_CODE | Context.CONTEXT_IGNORE_SECURITY);
+                Class<?> bsClass = tgClassLoader.loadClass(
+                        "org.telegram.ui.ActionBar.BottomSheet");
+                Constructor<?> ctor = bsClass.getConstructor(Context.class, boolean.class);
+                Object sheet = ctor.newInstance(context, false);
+                dialogRef = sheet;
 
-                Class<?> bsdClass = Class.forName(
-                        "com.google.android.material.bottomsheet.BottomSheetDialog",
-                        true, TGCleanSheet.class.getClassLoader());
-                Constructor<?> ctor = bsdClass.getConstructor(Context.class);
-                Object dialog = ctor.newInstance(moduleContext);
-                dialogRef = dialog; // 保存引用
-
-                Method setContentView = bsdClass.getMethod("setContentView", View.class);
-                Method show = bsdClass.getMethod("show");
-
+                // setCustomView(View)
+                Method setCustomView = bsClass.getMethod("setCustomView", View.class);
                 View contentView = buildContent();
-                setContentView.invoke(dialog, contentView);
+                setCustomView.invoke(sheet, contentView);
 
-                // BottomSheetDialog 自带 MATCH_PARENT 宽度和 peekHeight 行为
-                // 不需要手动 setLayout
-
-                show.invoke(dialog);
+                // show()
+                Method show = bsClass.getMethod("show");
+                show.invoke(sheet);
             } catch (Throwable t) {
                 // Fallback: 使用标准 AlertDialog 展示内容
                 try {
@@ -257,7 +250,7 @@ public class TGCleanSheet {
                     builder.setPositiveButton("确定", null);
                     builder.show();
                 } catch (Throwable ignored) {}
-                Log.e(TAG, "Failed to create BottomSheetDialog", t);
+                Log.e(TAG, "Failed to create BottomSheet", t);
             }
         }
 
