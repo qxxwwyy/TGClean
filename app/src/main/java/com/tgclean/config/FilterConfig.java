@@ -26,10 +26,13 @@ import io.github.libxposed.api.XposedModule;
  *    所有 edit() 调用会抛 UnsupportedOperationException。
  *    写入操作必须在 App 端通过 FilterConfigWriter 完成。
  *
- * 使用 libxposed RemotePreferences 实现跨进程配置共享。
- * channel_rules 使用 JSON 格式：
- *   {"-100123":["kw1","kw2"], "-100456":["kw3"]}
- * 读取时自动兼容旧格式 "id:kw1,kw2;id:kw3"。
+ * 数据结构：
+ *   rule_sets: JSON array of rule set objects
+ *     [{id, name, enabled, keywords[], use_regex}]
+ *   rule_set_channels: JSON object
+ *     {ruleSetId: [dialogId, ...]}
+ *   global_keywords: string (newline separated)
+ *   whitelist: JSON array of dialogId
  */
 public class FilterConfig {
     private static final String TAG = "TGClean-Config";
@@ -38,11 +41,13 @@ public class FilterConfig {
     private static final String KEY_ENABLED = "filter_enabled";
     private static final String KEY_GLOBAL_KEYWORDS = "global_keywords";
     private static final String KEY_USE_REGEX = "use_regex";
-    private static final String KEY_CHANNEL_RULES = "channel_rules";
+    private static final String KEY_CHANNEL_RULES = "channel_rules"; // legacy
     private static final String KEY_WHITELIST = "whitelist";
     private static final String KEY_REACTIONS_ENABLED = "reactions_filter_enabled";
     private static final String KEY_REACTIONS_EMOJI = "reactions_filter_emoji";
     private static final String KEY_REACTIONS_THRESHOLD = "reactions_filter_threshold";
+    private static final String KEY_RULE_SETS = "rule_sets";
+    private static final String KEY_RULE_SET_CHANNELS = "rule_set_channels";
 
     private final XposedModule module;
     private final SharedPreferences prefs;
@@ -76,7 +81,44 @@ public class FilterConfig {
     }
 
     // ═════════════════════════════════════════════
-    // 全局关键词
+    // 规则集（Rule Sets）
+    // ═════════════════════════════════════════════
+
+    public List<RuleSet> getRuleSets() {
+        String raw = prefs.getString(KEY_RULE_SETS, "");
+        if (raw == null || raw.isEmpty() || !raw.trim().startsWith("[")) {
+            return new ArrayList<>();
+        }
+        return parseRuleSetsJson(raw);
+    }
+
+    /**
+     * 获取 规则集ID → 频道ID列表 的映射
+     */
+    public Map<String, Set<Long>> getRuleSetChannels() {
+        String raw = prefs.getString(KEY_RULE_SET_CHANNELS, "");
+        if (raw == null || raw.isEmpty() || !raw.trim().startsWith("{")) {
+            return new HashMap<>();
+        }
+        return parseRuleSetChannelsJson(raw);
+    }
+
+    /**
+     * 获取 频道ID → 规则集ID列表 的反向映射（用于UI展示）
+     */
+    public Map<Long, List<String>> getChannelRuleSetIds() {
+        Map<String, Set<Long>> forward = getRuleSetChannels();
+        Map<Long, List<String>> reverse = new HashMap<>();
+        for (Map.Entry<String, Set<Long>> entry : forward.entrySet()) {
+            for (Long dialogId : entry.getValue()) {
+                reverse.computeIfAbsent(dialogId, k -> new ArrayList<>()).add(entry.getKey());
+            }
+        }
+        return reverse;
+    }
+
+    // ═════════════════════════════════════════════
+    // 全局关键词（兜底匹配）
     // ═════════════════════════════════════════════
 
     public Set<String> getGlobalKeywords() {
@@ -105,13 +147,9 @@ public class FilterConfig {
     }
 
     // ═════════════════════════════════════════════
-    // 分频道规则 — JSON 存储格式
+    // 旧版分频道规则（兼容读取）
     // ═════════════════════════════════════════════
 
-    /**
-     * 获取分频道关键词
-     * 读取时自动兼容旧格式 "id:kw1,kw2;id2:kw3"
-     */
     public Map<Long, Set<String>> getChannelKeywords() {
         String raw = prefs.getString(KEY_CHANNEL_RULES, "");
         if (raw == null || raw.isEmpty()) return new HashMap<>();
@@ -119,8 +157,6 @@ public class FilterConfig {
         if (raw.trim().startsWith("{")) {
             return parseChannelRulesJson(raw);
         }
-
-        // Fallback: 旧格式解析
         return parseChannelRulesLegacy(raw);
     }
 
@@ -182,6 +218,56 @@ public class FilterConfig {
     // ═════════════════════════════════════════════
     // 内部反序列化
     // ═════════════════════════════════════════════
+
+    private List<RuleSet> parseRuleSetsJson(String raw) {
+        List<RuleSet> result = new ArrayList<>();
+        try {
+            JSONArray arr = new JSONArray(raw);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject obj = arr.getJSONObject(i);
+                String id = obj.optString("id", "");
+                String name = obj.optString("name", "");
+                boolean enabled = obj.optBoolean("enabled", true);
+                boolean useRegex = obj.optBoolean("use_regex", false);
+
+                Set<String> keywords = new HashSet<>();
+                JSONArray kwArr = obj.optJSONArray("keywords");
+                if (kwArr != null) {
+                    for (int j = 0; j < kwArr.length(); j++) {
+                        String kw = kwArr.getString(j).trim();
+                        if (!kw.isEmpty()) keywords.add(kw);
+                    }
+                }
+
+                if (!id.isEmpty()) {
+                    result.add(new RuleSet(id, name, enabled, useRegex, keywords));
+                }
+            }
+        } catch (JSONException e) {
+            module.log(Log.WARN, TAG, "Failed to parse rule sets JSON: " + e.getMessage());
+        }
+        return result;
+    }
+
+    private Map<String, Set<Long>> parseRuleSetChannelsJson(String raw) {
+        Map<String, Set<Long>> result = new HashMap<>();
+        try {
+            JSONObject obj = new JSONObject(raw);
+            Iterator<String> keys = obj.keys();
+            while (keys.hasNext()) {
+                String ruleSetId = keys.next();
+                JSONArray arr = obj.getJSONArray(ruleSetId);
+                Set<Long> dialogIds = new HashSet<>();
+                for (int i = 0; i < arr.length(); i++) {
+                    dialogIds.add(arr.getLong(i));
+                }
+                result.put(ruleSetId, dialogIds);
+            }
+        } catch (JSONException e) {
+            module.log(Log.WARN, TAG, "Failed to parse rule set channels JSON: " + e.getMessage());
+        }
+        return result;
+    }
 
     private Map<Long, Set<String>> parseChannelRulesJson(String raw) {
         Map<Long, Set<String>> result = new HashMap<>();
@@ -250,5 +336,25 @@ public class FilterConfig {
             }
         }
         return result;
+    }
+
+    // ═════════════════════════════════════════════
+    // 规则集数据模型
+    // ═════════════════════════════════════════════
+
+    public static class RuleSet {
+        public final String id;
+        public final String name;
+        public final boolean enabled;
+        public final boolean useRegex;
+        public final Set<String> keywords;
+
+        public RuleSet(String id, String name, boolean enabled, boolean useRegex, Set<String> keywords) {
+            this.id = id;
+            this.name = name;
+            this.enabled = enabled;
+            this.useRegex = useRegex;
+            this.keywords = keywords;
+        }
     }
 }

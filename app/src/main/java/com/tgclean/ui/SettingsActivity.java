@@ -8,16 +8,15 @@ import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
-import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.materialswitch.MaterialSwitch;
 import com.google.android.material.snackbar.Snackbar;
@@ -31,44 +30,47 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import io.github.libxposed.service.XposedService;
 
 /**
- * TGClean 设置界面
+ * TGClean 主设置界面
  *
- * 频道列表从 SharedPreferences 自动获取（Hook 端通过 BroadcastReceiver 发送发现数据）。
- * 全局设置 + 频道管理 + 白名单。
+ * 结构：
+ * - 模块状态开关
+ * - 规则集列表（CRUD）
+ * - Reactions 过滤
+ * - 发现的频道（汇总展示覆盖状态）
  */
 public class SettingsActivity extends AppCompatActivity {
 
     private static final String TAG = "TGClean-Settings";
     private static final String PREFS_NAME = "tgclean_config";
 
-    // ─── 全局设置控件 ───
+    // ─── 控件 ───
     private MaterialSwitch switchEnabled;
-    private MaterialSwitch switchRegex;
     private MaterialSwitch switchReactions;
-    private TextInputEditText editKeywords;
     private TextInputEditText editReactionsEmoji;
     private TextInputEditText editReactionsThreshold;
-    private MaterialButton btnSave;
-    private LinearLayout layoutWaiting;
-    private TextView textWaiting;
-
-    // ─── 频道管理 ───
-    private RecyclerView recyclerViewChannels;
-    private ChannelListAdapter channelAdapter;
-    private MaterialButton btnAddWhitelist;
-    private TextView textWhitelistCount;
+    private RecyclerView recyclerRuleSets;
+    private RuleSetAdapter ruleSetAdapter;
+    private RecyclerView recyclerChannels;
+    private ChannelSummaryAdapter channelAdapter;
+    private TextInputEditText editChannelSearch;
+    private View layoutWaiting;
+    private View scrollContent;
     private TextView textChannelCount;
+    private TextView textEmptyRules;
 
     private SharedPreferences remotePrefs = null;
     private SharedPreferences discoveredPrefs = null;
+    private FilterConfigWriter writer = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -81,11 +83,7 @@ public class SettingsActivity extends AppCompatActivity {
         setupListeners();
 
         layoutWaiting = findViewById(R.id.layout_waiting);
-        textWaiting = findViewById(R.id.text_waiting);
-        if (layoutWaiting != null && textWaiting != null) {
-            layoutWaiting.setVisibility(View.VISIBLE);
-            textWaiting.setText("正在连接 XposedService...");
-        }
+        scrollContent = findViewById(R.id.scroll_content);
 
         App.addServiceReadyListener(serviceReadyListener);
     }
@@ -101,77 +99,46 @@ public class SettingsActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        refreshChannelList();
-        refreshWhitelistCount();
+        if (writer != null) {
+            refreshRuleSets();
+            refreshChannels();
+        }
     }
 
     private void initViews() {
         switchEnabled = findViewById(R.id.switch_enabled);
-        switchRegex = findViewById(R.id.switch_regex);
         switchReactions = findViewById(R.id.switch_reactions);
-        editKeywords = findViewById(R.id.edit_keywords);
         editReactionsEmoji = findViewById(R.id.edit_reactions_emoji);
         editReactionsThreshold = findViewById(R.id.edit_reactions_threshold);
-        btnSave = findViewById(R.id.btn_save);
 
-        hideLegacyViews();
+        recyclerRuleSets = findViewById(R.id.recycler_rule_sets);
+        recyclerRuleSets.setLayoutManager(new LinearLayoutManager(this));
+        ruleSetAdapter = new RuleSetAdapter();
+        recyclerRuleSets.setAdapter(ruleSetAdapter);
 
-        recyclerViewChannels = findViewById(R.id.recycler_channels);
-        recyclerViewChannels.setLayoutManager(new LinearLayoutManager(this));
-        channelAdapter = new ChannelListAdapter();
-        recyclerViewChannels.setAdapter(channelAdapter);
+        textEmptyRules = findViewById(R.id.text_empty_rules);
 
-        btnAddWhitelist = findViewById(R.id.btn_add_whitelist);
-        textWhitelistCount = findViewById(R.id.text_whitelist_count);
+        recyclerChannels = findViewById(R.id.recycler_channels);
+        recyclerChannels.setLayoutManager(new LinearLayoutManager(this));
+        channelAdapter = new ChannelSummaryAdapter();
+        recyclerChannels.setAdapter(channelAdapter);
+
+        editChannelSearch = findViewById(R.id.edit_channel_search);
         textChannelCount = findViewById(R.id.text_channel_count);
-    }
 
-    private void hideLegacyViews() {
-        View channelSection = findViewById(R.id.edit_channel_rules);
-        if (channelSection != null) {
-            View parent = (View) channelSection.getParent();
-            if (parent instanceof LinearLayout) ((LinearLayout) parent).setVisibility(View.GONE);
-        }
-        View pasteBtn = findViewById(R.id.btn_paste_id);
-        if (pasteBtn != null) pasteBtn.setVisibility(View.GONE);
-    }
-
-    // ═════════════════════════════════════════════
-    // 频道列表加载（从 SharedPreferences）
-    // ═════════════════════════════════════════════
-
-    private void refreshChannelList() {
-        List<ChannelInfo> channels = new ArrayList<>();
-
-        try {
-            String json = ChannelReceiver.getChannelsJson(this);
-            JSONObject obj = new JSONObject(json);
-
-            Iterator<String> keys = obj.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                try {
-                    long dialogId = Long.parseLong(key);
-                    JSONObject ch = obj.getJSONObject(key);
-                    String name = ch.optString("name", String.valueOf(dialogId));
-                    long lastSeen = ch.optLong("last_seen", 0);
-
-                    Set<String> keywords = getChannelKeywords(dialogId);
-                    channels.add(new ChannelInfo(dialogId, name, lastSeen, keywords));
-                } catch (NumberFormatException ignored) {}
+        // 频道搜索
+        editChannelSearch.addTextChangedListener(new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(android.text.Editable s) {
+                refreshChannels(s.toString().trim());
             }
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to load discovered channels", e);
-        }
+        });
+    }
 
-        // 按 lastSeen 倒序
-        channels.sort((a, b) -> Long.compare(b.lastSeen, a.lastSeen));
-
-        if (textChannelCount != null) {
-            textChannelCount.setText("已发现 " + channels.size() + " 个频道");
-        }
-
-        channelAdapter.submitList(channels);
+    private void setupListeners() {
+        findViewById(R.id.btn_add_rule_set).setOnClickListener(v -> showCreateRuleSetDialog());
+        findViewById(R.id.btn_save).setOnClickListener(v -> saveSettings());
     }
 
     // ═════════════════════════════════════════════
@@ -182,101 +149,147 @@ public class SettingsActivity extends AppCompatActivity {
         Log.i(TAG, "XposedService ready");
         runOnUiThread(() -> {
             if (layoutWaiting != null) layoutWaiting.setVisibility(View.GONE);
+            if (scrollContent != null) scrollContent.setVisibility(View.VISIBLE);
 
-            try {
-                remotePrefs = service.getRemotePreferences(PREFS_NAME);
-                switchEnabled.setChecked(remotePrefs.getBoolean("filter_enabled", true));
-                switchRegex.setChecked(remotePrefs.getBoolean("use_regex", false));
-                switchReactions.setChecked(remotePrefs.getBoolean("reactions_filter_enabled", false));
-                editKeywords.setText(remotePrefs.getString("global_keywords", ""));
-                editReactionsEmoji.setText(remotePrefs.getString("reactions_filter_emoji", "👎"));
-                editReactionsThreshold.setText(String.valueOf(
-                        remotePrefs.getInt("reactions_filter_threshold", 10)));
-            } catch (Throwable t) {
-                Log.e(TAG, "Failed to load prefs", t);
+            remotePrefs = service.getRemotePreferences(PREFS_NAME);
+            writer = new FilterConfigWriter(remotePrefs);
+
+            switchEnabled.setChecked(remotePrefs.getBoolean("filter_enabled", true));
+            switchReactions.setChecked(remotePrefs.getBoolean("reactions_filter_enabled", false));
+            editReactionsEmoji.setText(remotePrefs.getString("reactions_filter_emoji", "👎"));
+            editReactionsThreshold.setText(String.valueOf(
+                    remotePrefs.getInt("reactions_filter_threshold", 10)));
+
+            // 执行旧数据迁移
+            boolean migrated = writer.migrateLegacyIfNeeded();
+            if (migrated) {
+                Snackbar.make(scrollContent, "已迁移旧版配置为规则集", Snackbar.LENGTH_LONG).show();
             }
 
-            refreshWhitelistCount();
-            refreshChannelList();
+            refreshRuleSets();
+            refreshChannels();
         });
     }
 
-    private void refreshWhitelistCount() {
-        Set<Long> wl = getWhitelist();
-        if (textWhitelistCount != null) {
-            textWhitelistCount.setText(wl.size() > 0
-                    ? wl.size() + " 个频道在白名单中"
-                    : "暂无白名单频道");
+    // ═════════════════════════════════════════════
+    // 规则集列表
+    // ═════════════════════════════════════════════
+
+    private void refreshRuleSets() {
+        if (writer == null) return;
+        List<FilterConfigWriter.RuleSetData> ruleSets = writer.getRuleSets();
+        Map<String, Set<Long>> channelMap = writer.getRuleSetChannels();
+
+        if (textEmptyRules != null) {
+            textEmptyRules.setVisibility(ruleSets.isEmpty() ? View.VISIBLE : View.GONE);
         }
+
+        ruleSetAdapter.submitList(ruleSets, channelMap);
+    }
+
+    private void showCreateRuleSetDialog() {
+        EditText editName = new EditText(this);
+        editName.setHint("例如：广告过滤");
+        editName.setSingleLine(true);
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("新建规则集")
+                .setView(editName)
+                .setPositiveButton("创建", (d, which) -> {
+                    String name = editName.getText().toString().trim();
+                    if (name.isEmpty()) return;
+
+                    FilterConfigWriter.RuleSetData rs = new FilterConfigWriter.RuleSetData(
+                            FilterConfigWriter.RuleSetData.generateId(),
+                            name, true, false, new HashSet<>());
+                    writer.addRuleSet(rs);
+                    refreshRuleSets();
+
+                    // 自动跳转到详情页
+                    Intent intent = new Intent(this, RuleSetDetailActivity.class);
+                    intent.putExtra(RuleSetDetailActivity.EXTRA_RULE_SET_ID, rs.id);
+                    startActivity(intent);
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     // ═════════════════════════════════════════════
-    // 配置读写
+    // 频道汇总列表
     // ═════════════════════════════════════════════
 
-    private Set<String> getChannelKeywords(long dialogId) {
-        Set<String> keywords = new HashSet<>();
-        if (remotePrefs == null) return keywords;
-        try {
-            String raw = remotePrefs.getString("channel_rules", "");
-            if (raw != null && raw.trim().startsWith("{")) {
-                JSONObject json = new JSONObject(raw);
-                String key = String.valueOf(dialogId);
-                if (json.has(key)) {
-                    JSONArray arr = json.getJSONArray(key);
-                    for (int i = 0; i < arr.length(); i++) {
-                        String kw = arr.getString(i).trim();
-                        if (!kw.isEmpty()) keywords.add(kw);
-                    }
+    private void refreshChannels() {
+        refreshChannels("");
+    }
+
+    private void refreshChannels(String query) {
+        List<ChannelSummary> channels = loadDiscoveredChannels();
+        Map<Long, List<FilterConfigWriter.RuleSetData>> channelRuleSets = writer != null
+                ? writer.getChannelRuleSets() : Collections.emptyMap();
+
+        String lowerQuery = query.toLowerCase();
+
+        // 过滤 + 搜索
+        List<ChannelSummary> filtered = new ArrayList<>();
+        for (ChannelSummary ch : channels) {
+            if (!query.isEmpty()) {
+                String nameLower = ch.name.toLowerCase();
+                String idStr = String.valueOf(ch.id);
+                if (!nameLower.contains(lowerQuery) && !idStr.contains(query)) continue;
+            }
+            ch.ruleSetNames = new ArrayList<>();
+            List<FilterConfigWriter.RuleSetData> rsList = channelRuleSets.get(ch.id);
+            if (rsList != null) {
+                for (FilterConfigWriter.RuleSetData rs : rsList) {
+                    ch.ruleSetNames.add(rs.name);
                 }
             }
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to load keywords for " + dialogId, e);
+            filtered.add(ch);
         }
-        return keywords;
+
+        if (textChannelCount != null) {
+            textChannelCount.setText(channels.size() + " 个频道");
+        }
+
+        channelAdapter.submitList(filtered);
     }
 
-    private Set<Long> getWhitelist() {
-        Set<Long> whitelist = new HashSet<>();
-        if (remotePrefs == null) return whitelist;
+    private List<ChannelSummary> loadDiscoveredChannels() {
+        List<ChannelSummary> result = new ArrayList<>();
         try {
-            String raw = remotePrefs.getString("whitelist", "");
-            if (raw != null && raw.trim().startsWith("[")) {
-                JSONArray arr = new JSONArray(raw);
-                for (int i = 0; i < arr.length(); i++) whitelist.add(arr.getLong(i));
+            String json = ChannelReceiver.getChannelsJson(this);
+            JSONObject obj = new JSONObject(json);
+            Iterator<String> keys = obj.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                try {
+                    long dialogId = Long.parseLong(key);
+                    JSONObject ch = obj.getJSONObject(key);
+                    String name = ch.optString("name", String.valueOf(dialogId));
+                    long lastSeen = ch.optLong("last_seen", 0);
+                    result.add(new ChannelSummary(dialogId, name, lastSeen));
+                } catch (NumberFormatException ignored) {}
             }
         } catch (Exception e) {
-            Log.e(TAG, "Failed to load whitelist", e);
+            Log.e(TAG, "Failed to load discovered channels", e);
         }
-        return whitelist;
+        result.sort((a, b) -> Long.compare(b.lastSeen, a.lastSeen));
+        return result;
     }
 
-    private void setupListeners() {
-        btnSave.setOnClickListener(v -> saveSettings());
-        if (btnAddWhitelist != null) {
-            btnAddWhitelist.setOnClickListener(v -> showAddWhitelistDialog());
-        }
-    }
+    // ═════════════════════════════════════════════
+    // 保存设置
+    // ═════════════════════════════════════════════
 
     private void saveSettings() {
-        if (remotePrefs == null) {
+        if (writer == null) {
             Snackbar.make(findViewById(android.R.id.content),
                     "XposedService 未就绪", Snackbar.LENGTH_LONG).show();
             return;
         }
 
-        FilterConfigWriter writer = new FilterConfigWriter(remotePrefs);
         writer.setEnabled(switchEnabled.isChecked());
-        writer.setUseRegex(switchRegex.isChecked());
         writer.setReactionsFilterEnabled(switchReactions.isChecked());
-
-        Set<String> keywords = new HashSet<>();
-        for (String line : editKeywords.getText().toString().split("\n")) {
-            String trimmed = line.trim();
-            if (!trimmed.isEmpty()) keywords.add(trimmed);
-        }
-        writer.setGlobalKeywords(keywords);
-
         writer.setReactionsFilterEmoji(editReactionsEmoji.getText().toString());
         try {
             writer.setReactionsFilterThreshold(
@@ -289,144 +302,137 @@ public class SettingsActivity extends AppCompatActivity {
                 getString(R.string.config_saved), Snackbar.LENGTH_SHORT).show();
     }
 
-    private void showAddWhitelistDialog() {
-        View dialogView = LayoutInflater.from(this)
-                .inflate(R.layout.dialog_add_channel, null);
-        TextInputEditText editId = dialogView.findViewById(R.id.edit_channel_id);
-
-        new MaterialAlertDialogBuilder(this)
-                .setTitle("添加白名单频道")
-                .setMessage("输入频道ID，该频道不会被过滤")
-                .setView(dialogView)
-                .setPositiveButton("添加", (d, which) -> {
-                    String input = editId.getText().toString().trim();
-                    if (input.isEmpty()) return;
-                    try {
-                        long id = Long.parseLong(input.replaceAll("[^0-9-]", ""));
-                        if (id == 0) throw new NumberFormatException();
-
-                        FilterConfigWriter writer = new FilterConfigWriter(remotePrefs);
-                        Set<Long> wl = getWhitelist();
-                        wl.add(id);
-                        writer.setWhitelist(wl);
-
-                        refreshWhitelistCount();
-                        refreshChannelList();
-                        Snackbar.make(findViewById(android.R.id.content),
-                                "已加入白名单: " + id, Snackbar.LENGTH_SHORT).show();
-                    } catch (NumberFormatException e) {
-                        Snackbar.make(findViewById(android.R.id.content),
-                                "无效的频道ID", Snackbar.LENGTH_SHORT).show();
-                    }
-                })
-                .setNegativeButton("取消", null)
-                .show();
-    }
-
     // ═════════════════════════════════════════════
-    // 频道列表 Adapter
+    // 规则集 Adapter
     // ═════════════════════════════════════════════
 
-    static class ChannelInfo {
-        final long id;
-        final String name;
-        final long lastSeen;
-        final Set<String> keywords;
-        boolean whitelisted;
+    class RuleSetAdapter extends RecyclerView.Adapter<RuleSetAdapter.ViewHolder> {
+        private final List<FilterConfigWriter.RuleSetData> items = new ArrayList<>();
+        private Map<String, Set<Long>> channelMap = new java.util.HashMap<>();
 
-        ChannelInfo(long id, String name, long lastSeen, Set<String> keywords) {
-            this.id = id;
-            this.name = name;
-            this.lastSeen = lastSeen;
-            this.keywords = keywords;
-        }
-    }
-
-    class ChannelListAdapter extends RecyclerView.Adapter<ChannelListAdapter.ViewHolder> {
-        private final List<ChannelInfo> items = new ArrayList<>();
-
-        void submitList(List<ChannelInfo> newItems) {
+        void submitList(List<FilterConfigWriter.RuleSetData> newItems, Map<String, Set<Long>> channelMap) {
             items.clear();
             if (newItems != null) items.addAll(newItems);
+            this.channelMap = channelMap != null ? channelMap : new java.util.HashMap<>();
             notifyDataSetChanged();
         }
 
-        @NonNull
-        @Override
+        @NonNull @Override
         public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
             View view = LayoutInflater.from(parent.getContext())
-                    .inflate(R.layout.item_channel, parent, false);
+                    .inflate(R.layout.item_rule_set, parent, false);
             return new ViewHolder(view);
         }
 
         @Override
         public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
-            ChannelInfo info = items.get(position);
-            holder.textChannelId.setText(info.name != null ? info.name : String.valueOf(info.id));
-            holder.textKeywordCount.setText(info.keywords.size() > 0
-                    ? info.keywords.size() + " 条关键词"
-                    : "未配置规则");
+            FilterConfigWriter.RuleSetData rs = items.get(position);
 
-            Set<Long> whitelist = getWhitelist();
-            info.whitelisted = whitelist.contains(info.id);
-            holder.textWhitelist.setVisibility(info.whitelisted ? View.VISIBLE : View.GONE);
+            holder.textStatusIcon.setText(rs.enabled ? "✅" : "⏸");
+            holder.textName.setText(rs.name);
+
+            Set<Long> channels = channelMap.get(rs.id);
+            int channelCount = channels != null ? channels.size() : 0;
+
+            StringBuilder info = new StringBuilder();
+            info.append(rs.keywords.size()).append(" 条关键词");
+            if (rs.useRegex) info.append(" · 正则");
+            info.append(" · ").append(channelCount).append(" 个频道");
+            holder.textInfo.setText(info.toString());
 
             holder.itemView.setOnClickListener(v -> {
-                Intent intent = new Intent(SettingsActivity.this, ChannelDetailActivity.class);
-                intent.putExtra(ChannelDetailActivity.EXTRA_DIALOG_ID, info.id);
-                intent.putExtra(ChannelDetailActivity.EXTRA_CHANNEL_NAME, info.name != null ? info.name : "");
+                Intent intent = new Intent(SettingsActivity.this, RuleSetDetailActivity.class);
+                intent.putExtra(RuleSetDetailActivity.EXTRA_RULE_SET_ID, rs.id);
                 startActivity(intent);
             });
 
-            // 长按删除发现记录（不影响过滤规则）
             holder.btnDelete.setOnClickListener(v -> {
                 new MaterialAlertDialogBuilder(SettingsActivity.this)
-                        .setTitle("删除频道")
-                        .setMessage("从发现列表中移除「" + (info.name != null ? info.name : info.id) + "」？\n（不会删除已配置的过滤规则）")
-                        .setPositiveButton("移除", (d, which) -> {
-                            removeDiscoveredChannel(info.id);
-                            refreshChannelList();
+                        .setTitle("删除规则集")
+                        .setMessage("确定删除「" + rs.name + "」？\n不会影响频道的白名单状态。")
+                        .setPositiveButton("删除", (d, which) -> {
+                            writer.deleteRuleSet(rs.id);
+                            refreshRuleSets();
+                            refreshChannels();
                         })
                         .setNegativeButton("取消", null)
                         .show();
             });
         }
 
-        @Override
-        public int getItemCount() {
-            return items.size();
-        }
+        @Override public int getItemCount() { return items.size(); }
 
         class ViewHolder extends RecyclerView.ViewHolder {
-            TextView textChannelId;
-            TextView textKeywordCount;
-            TextView textWhitelist;
+            TextView textStatusIcon, textName, textInfo;
             View btnDelete;
 
             ViewHolder(View itemView) {
                 super(itemView);
-                textChannelId = itemView.findViewById(R.id.text_channel_id);
-                textKeywordCount = itemView.findViewById(R.id.text_keyword_count);
-                textWhitelist = itemView.findViewById(R.id.text_whitelist_badge);
-                btnDelete = itemView.findViewById(R.id.btn_delete_channel);
+                textStatusIcon = itemView.findViewById(R.id.text_status_icon);
+                textName = itemView.findViewById(R.id.text_rule_set_name);
+                textInfo = itemView.findViewById(R.id.text_rule_set_info);
+                btnDelete = itemView.findViewById(R.id.btn_delete_rule_set);
             }
         }
     }
 
     // ═════════════════════════════════════════════
-    // 发现频道删除
+    // 频道汇总 Adapter
     // ═════════════════════════════════════════════
 
-    private void removeDiscoveredChannel(long dialogId) {
-        try {
-            SharedPreferences.Editor editor = discoveredPrefs.edit();
-            String json = discoveredPrefs.getString("channels_json", "{}");
-            JSONObject channels = new JSONObject(json);
-            channels.remove(String.valueOf(dialogId));
-            editor.putString("channels_json", channels.toString());
-            editor.apply();
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to remove discovered channel", e);
+    static class ChannelSummary {
+        final long id;
+        final String name;
+        final long lastSeen;
+        List<String> ruleSetNames = new ArrayList<>();
+
+        ChannelSummary(long id, String name, long lastSeen) {
+            this.id = id;
+            this.name = name;
+            this.lastSeen = lastSeen;
+        }
+    }
+
+    class ChannelSummaryAdapter extends RecyclerView.Adapter<ChannelSummaryAdapter.ViewHolder> {
+        private final List<ChannelSummary> items = new ArrayList<>();
+
+        void submitList(List<ChannelSummary> newItems) {
+            items.clear();
+            if (newItems != null) items.addAll(newItems);
+            notifyDataSetChanged();
+        }
+
+        @NonNull @Override
+        public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+            View view = LayoutInflater.from(parent.getContext())
+                    .inflate(R.layout.item_channel_summary, parent, false);
+            return new ViewHolder(view);
+        }
+
+        @Override
+        public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
+            ChannelSummary ch = items.get(position);
+            holder.textName.setText(ch.name);
+            holder.textId.setText(String.valueOf(ch.id));
+
+            if (!ch.ruleSetNames.isEmpty()) {
+                holder.textBadge.setText("🛡 " + String.join(", ", ch.ruleSetNames));
+            } else {
+                holder.textBadge.setText("—");
+            }
+        }
+
+        @Override public int getItemCount() { return items.size(); }
+
+        class ViewHolder extends RecyclerView.ViewHolder {
+            TextView textName, textId, textBadge;
+
+            ViewHolder(View itemView) {
+                super(itemView);
+                textName = itemView.findViewById(R.id.text_channel_name);
+                textId = itemView.findViewById(R.id.text_channel_id);
+                textBadge = itemView.findViewById(R.id.text_rule_set_badge);
+            }
         }
     }
 }

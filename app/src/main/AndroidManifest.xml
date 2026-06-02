@@ -19,7 +19,7 @@
         </activity>
 
         <activity
-            android:name=".ui.ChannelDetailActivity"
+            android:name=".ui.RuleSetDetailActivity"
             android:exported="false"
             android:parentActivityName=".ui.SettingsActivity" />
 

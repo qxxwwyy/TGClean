@@ -28,12 +28,15 @@ public class FilterConfigWriter {
     private static final String KEY_ENABLED = "filter_enabled";
     private static final String KEY_GLOBAL_KEYWORDS = "global_keywords";
     private static final String KEY_USE_REGEX = "use_regex";
-    private static final String KEY_CHANNEL_RULES = "channel_rules";
+    private static final String KEY_CHANNEL_RULES = "channel_rules"; // legacy
     private static final String KEY_WHITELIST = "whitelist";
     private static final String KEY_REACTIONS_ENABLED = "reactions_filter_enabled";
     private static final String KEY_REACTIONS_EMOJI = "reactions_filter_emoji";
     private static final String KEY_REACTIONS_THRESHOLD = "reactions_filter_threshold";
     private static final String KEY_DISCOVERED_CHANNELS = "discovered_channels";
+    private static final String KEY_RULE_SETS = "rule_sets";
+    private static final String KEY_RULE_SET_CHANNELS = "rule_set_channels";
+    private static final String KEY_MIGRATED_LEGACY = "migrated_legacy_v2";
 
     private final SharedPreferences prefs;
 
@@ -54,23 +57,217 @@ public class FilterConfigWriter {
     }
 
     // ═════════════════════════════════════════════
+    // 规则集 CRUD
+    // ═════════════════════════════════════════════
+
+    public List<RuleSetData> getRuleSets() {
+        String raw = prefs.getString(KEY_RULE_SETS, "");
+        if (raw == null || raw.isEmpty() || !raw.trim().startsWith("[")) {
+            return new ArrayList<>();
+        }
+        return parseRuleSetsJson(raw);
+    }
+
+    public void saveRuleSets(List<RuleSetData> ruleSets) {
+        if (ruleSets == null || ruleSets.isEmpty()) {
+            prefs.edit().putString(KEY_RULE_SETS, "").apply();
+            return;
+        }
+        JSONArray arr = new JSONArray();
+        for (RuleSetData rs : ruleSets) {
+            try {
+                JSONObject obj = new JSONObject();
+                obj.put("id", rs.id);
+                obj.put("name", rs.name);
+                obj.put("enabled", rs.enabled);
+                obj.put("use_regex", rs.useRegex);
+                JSONArray kwArr = new JSONArray();
+                for (String kw : rs.keywords) kwArr.put(kw);
+                obj.put("keywords", kwArr);
+                arr.put(obj);
+            } catch (JSONException e) {
+                Log.e(TAG, "Failed to serialize rule set: " + rs.id, e);
+            }
+        }
+        prefs.edit().putString(KEY_RULE_SETS, arr.toString()).apply();
+    }
+
+    public void addRuleSet(RuleSetData ruleSet) {
+        List<RuleSetData> sets = getRuleSets();
+        sets.add(ruleSet);
+        saveRuleSets(sets);
+    }
+
+    public void updateRuleSet(RuleSetData ruleSet) {
+        List<RuleSetData> sets = getRuleSets();
+        for (int i = 0; i < sets.size(); i++) {
+            if (sets.get(i).id.equals(ruleSet.id)) {
+                sets.set(i, ruleSet);
+                break;
+            }
+        }
+        saveRuleSets(sets);
+    }
+
+    public void deleteRuleSet(String ruleSetId) {
+        List<RuleSetData> sets = getRuleSets();
+        sets.removeIf(rs -> rs.id.equals(ruleSetId));
+        saveRuleSets(sets);
+
+        // 同时清理频道映射
+        removeRuleSetChannels(ruleSetId);
+    }
+
+    // ═════════════════════════════════════════════
+    // 规则集 ↔ 频道映射
+    // ═════════════════════════════════════════════
+
+    public Map<String, Set<Long>> getRuleSetChannels() {
+        String raw = prefs.getString(KEY_RULE_SET_CHANNELS, "");
+        if (raw == null || raw.isEmpty() || !raw.trim().startsWith("{")) {
+            return new java.util.HashMap<>();
+        }
+        return parseRuleSetChannelsJson(raw);
+    }
+
+    /**
+     * 获取 频道ID → 规则集列表 的反向映射
+     */
+    public Map<Long, List<RuleSetData>> getChannelRuleSets() {
+        List<RuleSetData> allSets = getRuleSets();
+        Map<String, Set<Long>> channelMap = getRuleSetChannels();
+        Map<Long, List<RuleSetData>> result = new java.util.HashMap<>();
+
+        for (Map.Entry<String, Set<Long>> entry : channelMap.entrySet()) {
+            RuleSetData rs = findRuleSet(allSets, entry.getKey());
+            if (rs == null) continue;
+            for (Long dialogId : entry.getValue()) {
+                result.computeIfAbsent(dialogId, k -> new ArrayList<>()).add(rs);
+            }
+        }
+        return result;
+    }
+
+    public void setRuleSetChannels(String ruleSetId, Set<Long> dialogIds) {
+        Map<String, Set<Long>> map = getRuleSetChannels();
+        if (dialogIds == null || dialogIds.isEmpty()) {
+            map.remove(ruleSetId);
+        } else {
+            map.put(ruleSetId, dialogIds);
+        }
+        saveRuleSetChannels(map);
+    }
+
+    public void addChannelToRuleSet(String ruleSetId, long dialogId) {
+        Map<String, Set<Long>> map = getRuleSetChannels();
+        map.computeIfAbsent(ruleSetId, k -> new HashSet<>()).add(dialogId);
+        saveRuleSetChannels(map);
+    }
+
+    public void removeChannelFromRuleSet(String ruleSetId, long dialogId) {
+        Map<String, Set<Long>> map = getRuleSetChannels();
+        Set<Long> ids = map.get(ruleSetId);
+        if (ids != null) {
+            ids.remove(dialogId);
+            if (ids.isEmpty()) map.remove(ruleSetId);
+            saveRuleSetChannels(map);
+        }
+    }
+
+    private void removeRuleSetChannels(String ruleSetId) {
+        Map<String, Set<Long>> map = getRuleSetChannels();
+        map.remove(ruleSetId);
+        saveRuleSetChannels(map);
+    }
+
+    private void saveRuleSetChannels(Map<String, Set<Long>> map) {
+        if (map.isEmpty()) {
+            prefs.edit().putString(KEY_RULE_SET_CHANNELS, "").apply();
+            return;
+        }
+        JSONObject obj = new JSONObject();
+        for (Map.Entry<String, Set<Long>> entry : map.entrySet()) {
+            JSONArray arr = new JSONArray();
+            for (Long id : entry.getValue()) arr.put(id);
+            try { obj.put(entry.getKey(), arr); } catch (JSONException ignored) {}
+        }
+        prefs.edit().putString(KEY_RULE_SET_CHANNELS, obj.toString()).apply();
+    }
+
+    private RuleSetData findRuleSet(List<RuleSetData> sets, String id) {
+        for (RuleSetData rs : sets) {
+            if (rs.id.equals(id)) return rs;
+        }
+        return null;
+    }
+
+    // ═════════════════════════════════════════════
+    // 旧版数据迁移
+    // ═════════════════════════════════════════════
+
+    /**
+     * 将旧版 channel_rules（{dialogId: [keywords]}）迁移为规则集。
+     * 每个有关键词的频道创建一个独立规则集。
+     * 返回 true 如果执行了迁移。
+     */
+    public boolean migrateLegacyIfNeeded() {
+        if (prefs.getBoolean(KEY_MIGRATED_LEGACY, false)) return false;
+
+        String raw = prefs.getString(KEY_CHANNEL_RULES, "");
+        if (raw == null || raw.isEmpty() || !raw.trim().startsWith("{")) {
+            // 没有旧数据，标记已迁移
+            prefs.edit().putBoolean(KEY_MIGRATED_LEGACY, true).apply();
+            return false;
+        }
+
+        try {
+            JSONObject json = new JSONObject(raw);
+            List<RuleSetData> ruleSets = getRuleSets();
+            Map<String, Set<Long>> channelMap = getRuleSetChannels();
+            long now = System.currentTimeMillis();
+
+            Iterator<String> keys = json.keys();
+            int migrated = 0;
+            while (keys.hasNext()) {
+                String dialogIdStr = keys.next();
+                JSONArray kwArr = json.getJSONArray(dialogIdStr);
+                Set<String> keywords = new HashSet<>();
+                for (int i = 0; i < kwArr.length(); i++) {
+                    String kw = kwArr.getString(i).trim();
+                    if (!kw.isEmpty()) keywords.add(kw);
+                }
+                if (keywords.isEmpty()) continue;
+
+                long dialogId = Long.parseLong(dialogIdStr);
+                String rsId = "rs_migrated_" + dialogId + "_" + (migrated++);
+                String rsName = "迁移-频道" + dialogId;
+
+                RuleSetData rs = new RuleSetData(rsId, rsName, true, false, keywords);
+                ruleSets.add(rs);
+                channelMap.computeIfAbsent(rsId, k -> new HashSet<>()).add(dialogId);
+            }
+
+            if (!ruleSets.isEmpty()) {
+                saveRuleSets(ruleSets);
+                saveRuleSetChannels(channelMap);
+            }
+
+            // 清除旧数据
+            prefs.edit().remove(KEY_CHANNEL_RULES).putBoolean(KEY_MIGRATED_LEGACY, true).apply();
+            Log.i(TAG, "Migrated " + migrated + " legacy channel rules to rule sets");
+            return true;
+        } catch (JSONException | NumberFormatException e) {
+            Log.e(TAG, "Failed to migrate legacy rules", e);
+            return false;
+        }
+    }
+
+    // ═════════════════════════════════════════════
     // 全局关键词
     // ═════════════════════════════════════════════
 
     public void setGlobalKeywords(Set<String> keywords) {
         prefs.edit().putString(KEY_GLOBAL_KEYWORDS, joinLines(keywords)).apply();
-    }
-
-    public void addGlobalKeyword(String keyword) {
-        Set<String> kw = getGlobalKeywords();
-        kw.add(keyword);
-        setGlobalKeywords(kw);
-    }
-
-    public void removeGlobalKeyword(String keyword) {
-        Set<String> kw = getGlobalKeywords();
-        kw.remove(keyword);
-        setGlobalKeywords(kw);
     }
 
     private Set<String> getGlobalKeywords() {
@@ -86,109 +283,17 @@ public class FilterConfigWriter {
     }
 
     // ═════════════════════════════════════════════
-    // 分频道关键词（JSON 格式）
+    // 白名单
     // ═════════════════════════════════════════════
 
-    public void setChannelRules(Map<Long, Set<String>> rules) {
-        saveChannelRules(rules);
-    }
-
-    public void addChannelKeyword(long dialogId, String keyword) {
-        Map<Long, Set<String>> rules = getChannelKeywords();
-        rules.computeIfAbsent(dialogId, k -> new HashSet<>()).add(keyword);
-        saveChannelRules(rules);
-    }
-
-    public void removeChannelKeyword(long dialogId, String keyword) {
-        Map<Long, Set<String>> rules = getChannelKeywords();
-        Set<String> kw = rules.get(dialogId);
-        if (kw != null) {
-            kw.remove(keyword);
-            if (kw.isEmpty()) rules.remove(dialogId);
-        }
-        saveChannelRules(rules);
-    }
-
-    public void removeChannelRule(long dialogId) {
-        Map<Long, Set<String>> rules = getChannelKeywords();
-        rules.remove(dialogId);
-        saveChannelRules(rules);
-    }
-
-    private Map<Long, Set<String>> getChannelKeywords() {
-        String raw = prefs.getString(KEY_CHANNEL_RULES, "");
-        if (raw == null || raw.isEmpty()) return new java.util.HashMap<>();
-        if (raw.trim().startsWith("{")) return parseChannelRulesJson(raw);
-        return new java.util.HashMap<>();
-    }
-
-    private void saveChannelRules(Map<Long, Set<String>> rules) {
-        if (rules.isEmpty()) {
-            prefs.edit().putString(KEY_CHANNEL_RULES, "").apply();
-            return;
-        }
-        try {
-            JSONObject json = new JSONObject();
-            for (Map.Entry<Long, Set<String>> entry : rules.entrySet()) {
-                JSONArray arr = new JSONArray();
-                for (String kw : entry.getValue()) arr.put(kw);
-                json.put(String.valueOf(entry.getKey()), arr);
-            }
-            prefs.edit().putString(KEY_CHANNEL_RULES, json.toString()).apply();
-        } catch (JSONException e) {
-            Log.e(TAG, "Failed to serialize channel rules", e);
-        }
-    }
-
-    private Map<Long, Set<String>> parseChannelRulesJson(String raw) {
-        Map<Long, Set<String>> result = new java.util.HashMap<>();
-        try {
-            JSONObject json = new JSONObject(raw);
-            Iterator<String> keys = json.keys();
-            while (keys.hasNext()) {
-                String key = keys.next();
-                JSONArray arr = json.getJSONArray(key);
-                Set<String> keywords = new HashSet<>();
-                for (int i = 0; i < arr.length(); i++) {
-                    String kw = arr.getString(i).trim();
-                    if (!kw.isEmpty()) keywords.add(kw);
-                }
-                if (!keywords.isEmpty()) result.put(Long.parseLong(key), keywords);
-            }
-        } catch (JSONException | NumberFormatException e) {
-            Log.e(TAG, "Failed to parse channel rules JSON", e);
-        }
-        return result;
-    }
-
-    // ═════════════════════════════════════════════
-    // 白名单（JSON 数组）
-    // ═════════════════════════════════════════════
-
-    public void setWhitelist(Set<Long> whitelist) {
-        saveWhitelist(whitelist);
-    }
-
-    public void addToWhitelist(long dialogId) {
-        Set<Long> wl = getWhitelist();
-        wl.add(dialogId);
-        saveWhitelist(wl);
-    }
-
-    public void removeFromWhitelist(long dialogId) {
-        Set<Long> wl = getWhitelist();
-        wl.remove(dialogId);
-        saveWhitelist(wl);
-    }
-
-    private Set<Long> getWhitelist() {
+    public Set<Long> getWhitelist() {
         String raw = prefs.getString(KEY_WHITELIST, "");
         if (raw == null || raw.isEmpty()) return new HashSet<>();
         if (raw.trim().startsWith("[")) return parseWhitelistJson(raw);
         return new HashSet<>();
     }
 
-    private void saveWhitelist(Set<Long> whitelist) {
+    public void setWhitelist(Set<Long> whitelist) {
         if (whitelist.isEmpty()) {
             prefs.edit().putString(KEY_WHITELIST, "").apply();
             return;
@@ -198,15 +303,16 @@ public class FilterConfigWriter {
         prefs.edit().putString(KEY_WHITELIST, arr.toString()).apply();
     }
 
-    private Set<Long> parseWhitelistJson(String raw) {
-        Set<Long> result = new HashSet<>();
-        try {
-            JSONArray arr = new JSONArray(raw);
-            for (int i = 0; i < arr.length(); i++) result.add(arr.getLong(i));
-        } catch (JSONException e) {
-            Log.e(TAG, "Failed to parse whitelist JSON", e);
-        }
-        return result;
+    public void addToWhitelist(long dialogId) {
+        Set<Long> wl = getWhitelist();
+        wl.add(dialogId);
+        setWhitelist(wl);
+    }
+
+    public void removeFromWhitelist(long dialogId) {
+        Set<Long> wl = getWhitelist();
+        wl.remove(dialogId);
+        setWhitelist(wl);
     }
 
     // ═════════════════════════════════════════════
@@ -226,13 +332,9 @@ public class FilterConfigWriter {
     }
 
     // ═════════════════════════════════════════════
-    // 频道发现列表（Hook 端写入，App 端读取）
+    // 频道发现列表
     // ═════════════════════════════════════════════
 
-    /**
-     * 读取 Hook 端发现的频道列表
-     * 格式：[{id: -100123, name: "频道A"}, ...]
-     */
     public List<DiscoveredChannel> getDiscoveredChannels() {
         List<DiscoveredChannel> result = new ArrayList<>();
         String raw = prefs.getString(KEY_DISCOVERED_CHANNELS, "");
@@ -263,6 +365,90 @@ public class FilterConfigWriter {
             sb.append(s);
         }
         return sb.toString();
+    }
+
+    // ─── 解析 ───
+
+    private List<RuleSetData> parseRuleSetsJson(String raw) {
+        List<RuleSetData> result = new ArrayList<>();
+        try {
+            JSONArray arr = new JSONArray(raw);
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject obj = arr.getJSONObject(i);
+                String id = obj.optString("id", "");
+                String name = obj.optString("name", "");
+                boolean enabled = obj.optBoolean("enabled", true);
+                boolean useRegex = obj.optBoolean("use_regex", false);
+                Set<String> keywords = new HashSet<>();
+                JSONArray kwArr = obj.optJSONArray("keywords");
+                if (kwArr != null) {
+                    for (int j = 0; j < kwArr.length(); j++) {
+                        String kw = kwArr.getString(j).trim();
+                        if (!kw.isEmpty()) keywords.add(kw);
+                    }
+                }
+                if (!id.isEmpty()) result.add(new RuleSetData(id, name, enabled, useRegex, keywords));
+            }
+        } catch (JSONException e) {
+            Log.e(TAG, "Failed to parse rule sets", e);
+        }
+        return result;
+    }
+
+    private Map<String, Set<Long>> parseRuleSetChannelsJson(String raw) {
+        Map<String, Set<Long>> result = new java.util.HashMap<>();
+        try {
+            JSONObject obj = new JSONObject(raw);
+            Iterator<String> keys = obj.keys();
+            while (keys.hasNext()) {
+                String ruleSetId = keys.next();
+                JSONArray arr = obj.getJSONArray(ruleSetId);
+                Set<Long> ids = new HashSet<>();
+                for (int i = 0; i < arr.length(); i++) ids.add(arr.getLong(i));
+                result.put(ruleSetId, ids);
+            }
+        } catch (JSONException e) {
+            Log.e(TAG, "Failed to parse rule set channels", e);
+        }
+        return result;
+    }
+
+    private Set<Long> parseWhitelistJson(String raw) {
+        Set<Long> result = new HashSet<>();
+        try {
+            JSONArray arr = new JSONArray(raw);
+            for (int i = 0; i < arr.length(); i++) result.add(arr.getLong(i));
+        } catch (JSONException e) {
+            Log.e(TAG, "Failed to parse whitelist", e);
+        }
+        return result;
+    }
+
+    // ═════════════════════════════════════════════
+    // 规则集数据模型（App端可写）
+    // ═════════════════════════════════════════════
+
+    public static class RuleSetData {
+        public String id;
+        public String name;
+        public boolean enabled;
+        public boolean useRegex;
+        public Set<String> keywords;
+
+        public RuleSetData(String id, String name, boolean enabled, boolean useRegex, Set<String> keywords) {
+            this.id = id;
+            this.name = name;
+            this.enabled = enabled;
+            this.useRegex = useRegex;
+            this.keywords = keywords != null ? keywords : new HashSet<>();
+        }
+
+        /**
+         * 生成新规则集 ID
+         */
+        public static String generateId() {
+            return "rs_" + System.currentTimeMillis();
+        }
     }
 
     /**

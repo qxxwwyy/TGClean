@@ -15,41 +15,44 @@ import java.util.regex.Pattern;
 /**
  * 关键词匹配引擎
  *
- * 支持：
- * - 全局关键词（应用于所有对话）
- * - 分频道关键词（仅应用于指定频道/群组）
- * - 纯文本匹配 + 正则匹配
- * - 白名单（不过滤的对话）
+ * 匹配优先级：
+ * 1. 白名单 → 放行
+ * 2. 规则集匹配 → 检查该规则集是否覆盖了当前频道，再匹配关键词
+ * 3. 旧版分频道规则（兼容迁移期）
+ * 4. 全局关键词兜底
+ * 5. Reactions 过滤
+ *
+ * 支持：纯文本匹配 + 正则匹配 + 每规则集独立正则开关
  */
 public class KeywordEngine {
     private final FilterConfig config;
 
-    // 全局关键词（纯文本）
+    // 规则集缓存
+    private List<FilterConfig.RuleSet> ruleSets = new ArrayList<>();
+    private Map<String, Set<Long>> ruleSetChannels = new HashMap<>();
+
+    // 全局关键词
     private Set<String> globalKeywords = new HashSet<>();
-    // 全局正则模式
     private List<Pattern> globalPatterns = new ArrayList<>();
-    // 分频道关键词: dialogId -> keywords
+
+    // 旧版分频道关键词（兼容）
     private Map<Long, Set<String>> channelKeywords = new HashMap<>();
-    // 分频道正则: dialogId -> patterns
     private Map<Long, List<Pattern>> channelPatterns = new HashMap<>();
-    // 白名单对话（不过滤）
+
+    // 白名单
     private Set<Long> whitelist = new HashSet<>();
 
     // 必须存为字段，否则 lambda 被 WeakReference 引用后会被 GC 回收
-    private final android.content.SharedPreferences.OnSharedPreferenceChangeListener prefChangeListener;
+    private final SharedPreferences.OnSharedPreferenceChangeListener prefChangeListener;
 
     public KeywordEngine(FilterConfig config) {
         this.config = config;
         loadRules();
 
-        // 监听配置变更，自动重载规则（TGCleanSheet UI 修改配置时触发）
         this.prefChangeListener = (prefs, key) -> loadRules();
         config.getPrefs().registerOnSharedPreferenceChangeListener(prefChangeListener);
     }
 
-    /**
-     * 检查过滤是否启用
-     */
     public boolean isEnabled() {
         return config.isEnabled();
     }
@@ -58,17 +61,51 @@ public class KeywordEngine {
      * 加载过滤规则
      */
     public void loadRules() {
-        // 从配置加载全局关键词
+        // 加载规则集
+        ruleSets = config.getRuleSets();
+        ruleSetChannels = config.getRuleSetChannels();
+
+        // 预编译规则集正则
+        compileRuleSetPatterns();
+
+        // 加载全局关键词
         globalKeywords = config.getGlobalKeywords();
         globalPatterns = config.getGlobalPatterns();
 
-        // 加载分频道规则
+        // 兼容：加载旧版分频道规则
         channelKeywords = config.getChannelKeywords();
         channelPatterns = config.getChannelPatterns();
 
         // 加载白名单
         whitelist = config.getWhitelist();
     }
+
+    // ═════════════════════════════════════════════
+    // 规则集正则缓存
+    // ═════════════════════════════════════════════
+
+    private final Map<String, List<Pattern>> ruleSetPatternCache = new HashMap<>();
+
+    private void compileRuleSetPatterns() {
+        ruleSetPatternCache.clear();
+        for (FilterConfig.RuleSet rs : ruleSets) {
+            if (rs.useRegex) {
+                List<Pattern> patterns = new ArrayList<>();
+                for (String kw : rs.keywords) {
+                    try {
+                        patterns.add(Pattern.compile(kw));
+                    } catch (Throwable t) {
+                        // skip invalid
+                    }
+                }
+                ruleSetPatternCache.put(rs.id, patterns);
+            }
+        }
+    }
+
+    // ═════════════════════════════════════════════
+    // 核心匹配
+    // ═════════════════════════════════════════════
 
     /**
      * 检查消息是否应被过滤
@@ -80,10 +117,24 @@ public class KeywordEngine {
     public boolean shouldFilter(String text, long dialogId) {
         if (text == null || text.isEmpty()) return false;
 
-        // 白名单检查
+        // 1. 白名单检查
         if (whitelist.contains(dialogId)) return false;
 
-        // 分频道关键词检查（优先级高于全局）
+        // 2. 规则集匹配（核心新逻辑）
+        for (FilterConfig.RuleSet rs : ruleSets) {
+            if (!rs.enabled) continue;
+
+            // 检查该规则集是否覆盖了此频道
+            Set<Long> channels = ruleSetChannels.get(rs.id);
+            if (channels == null || !channels.contains(dialogId)) continue;
+
+            // 关键词匹配
+            if (matchKeywords(text, rs.keywords, rs.useRegex, rs.id)) {
+                return true;
+            }
+        }
+
+        // 3. 旧版分频道关键词（兼容迁移期）
         Set<String> channelKw = channelKeywords.get(dialogId);
         if (channelKw != null && !channelKw.isEmpty()) {
             for (String keyword : channelKw) {
@@ -91,7 +142,6 @@ public class KeywordEngine {
             }
         }
 
-        // 分频道正则检查
         List<Pattern> channelPat = channelPatterns.get(dialogId);
         if (channelPat != null) {
             for (Pattern pattern : channelPat) {
@@ -99,12 +149,11 @@ public class KeywordEngine {
             }
         }
 
-        // 全局关键词检查
+        // 4. 全局关键词检查
         for (String keyword : globalKeywords) {
             if (text.contains(keyword)) return true;
         }
 
-        // 全局正则检查
         for (Pattern pattern : globalPatterns) {
             if (pattern.matcher(text).find()) return true;
         }
@@ -114,17 +163,10 @@ public class KeywordEngine {
 
     /**
      * 检查消息是否应被过滤（包含Reactions检查）
-     *
-     * @param text       消息文本
-     * @param dialogId   对话ID
-     * @param reactions  消息的Reactions数据（TLRPC.TL_messageReactions）
-     * @return true=应过滤
      */
     public boolean shouldFilter(String text, long dialogId, Object reactions) {
-        // 先检查文本关键词
         if (shouldFilter(text, dialogId)) return true;
 
-        // 再检查Reactions
         if (reactions != null && config.isReactionsFilterEnabled()) {
             return checkReactions(reactions);
         }
@@ -132,18 +174,28 @@ public class KeywordEngine {
         return false;
     }
 
-    /**
-     * 检查Reactions是否触发过滤
-     *
-     * Telegram Reactions 结构：
-     * TLRPC.TL_messageReactions
-     *   └── results: ArrayList<ReactionCount>
-     *         ├── reaction: Reaction (TL_reactionEmoji.emoticon)
-     *         └── count: int
-     */
+    private boolean matchKeywords(String text, Set<String> keywords, boolean useRegex, String ruleSetId) {
+        if (useRegex) {
+            List<Pattern> patterns = ruleSetPatternCache.get(ruleSetId);
+            if (patterns != null) {
+                for (Pattern pattern : patterns) {
+                    if (pattern.matcher(text).find()) return true;
+                }
+            }
+        } else {
+            for (String keyword : keywords) {
+                if (text.contains(keyword)) return true;
+            }
+        }
+        return false;
+    }
+
+    // ═════════════════════════════════════════════
+    // Reactions 过滤（不变）
+    // ═════════════════════════════════════════════
+
     private boolean checkReactions(Object reactions) {
         try {
-            // 获取 results 字段
             java.lang.reflect.Field resultsField = reactions.getClass().getDeclaredField("results");
             resultsField.setAccessible(true);
             Object results = resultsField.get(reactions);
@@ -154,19 +206,16 @@ public class KeywordEngine {
             int threshold = config.getReactionsFilterThreshold();
 
             for (Object reactionCount : reactionCountList) {
-                // 获取 reaction 字段
                 java.lang.reflect.Field reactionField = reactionCount.getClass().getDeclaredField("reaction");
                 reactionField.setAccessible(true);
                 Object reaction = reactionField.get(reactionCount);
 
-                // 检查是否为 TL_reactionEmoji
                 if (reaction != null && reaction.getClass().getSimpleName().equals("TL_reactionEmoji")) {
                     java.lang.reflect.Field emoticonField = reaction.getClass().getDeclaredField("emoticon");
                     emoticonField.setAccessible(true);
                     String emoticon = (String) emoticonField.get(reaction);
 
                     if (targetEmoji.equals(emoticon)) {
-                        // 获取 count
                         java.lang.reflect.Field countField = reactionCount.getClass().getDeclaredField("count");
                         countField.setAccessible(true);
                         int count = countField.getInt(reactionCount);
