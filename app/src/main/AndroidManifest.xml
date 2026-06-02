@@ -26,8 +26,7 @@
         <provider
             android:name=".provider.ChannelProvider"
             android:authorities="com.tgclean.provider.channels"
-            android:exported="true"
-            android:grantUriPermission="false" />
+            android:exported="true" />
 
     </application>
 </manifest>
