@@ -3,7 +3,6 @@ package com.tgclean.ui;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.database.Cursor;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.LayoutInflater;
@@ -15,9 +14,6 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.loader.app.LoaderManager;
-import androidx.loader.content.CursorLoader;
-import androidx.loader.content.Loader;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -29,17 +25,15 @@ import com.google.android.material.textfield.TextInputEditText;
 import com.tgclean.App;
 import com.tgclean.R;
 import com.tgclean.config.FilterConfigWriter;
-import com.tgclean.provider.ChannelProvider;
+import com.tgclean.receiver.ChannelReceiver;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import io.github.libxposed.service.XposedService;
@@ -47,11 +41,10 @@ import io.github.libxposed.service.XposedService;
 /**
  * TGClean 设置界面
  *
- * 频道列表从 ContentProvider 自动获取（Hook 端通过 TG 自动发现）。
+ * 频道列表从 SharedPreferences 自动获取（Hook 端通过 BroadcastReceiver 发送发现数据）。
  * 全局设置 + 频道管理 + 白名单。
  */
-public class SettingsActivity extends AppCompatActivity
-        implements LoaderManager.LoaderCallbacks<Cursor> {
+public class SettingsActivity extends AppCompatActivity {
 
     private static final String TAG = "TGClean-Settings";
     private static final String PREFS_NAME = "tgclean_config";
@@ -75,11 +68,14 @@ public class SettingsActivity extends AppCompatActivity
     private TextView textChannelCount;
 
     private SharedPreferences remotePrefs = null;
+    private SharedPreferences discoveredPrefs = null;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_settings);
+
+        discoveredPrefs = getSharedPreferences("discovered_channels", Context.MODE_PRIVATE);
 
         initViews();
         setupListeners();
@@ -105,10 +101,8 @@ public class SettingsActivity extends AppCompatActivity
     @Override
     protected void onResume() {
         super.onResume();
-        if (remotePrefs != null) {
-            refreshChannelList();
-            refreshWhitelistCount();
-        }
+        refreshChannelList();
+        refreshWhitelistCount();
     }
 
     private void initViews() {
@@ -130,9 +124,6 @@ public class SettingsActivity extends AppCompatActivity
         btnAddWhitelist = findViewById(R.id.btn_add_whitelist);
         textWhitelistCount = findViewById(R.id.text_whitelist_count);
         textChannelCount = findViewById(R.id.text_channel_count);
-
-        // 启动 CursorLoader 自动从 ContentProvider 加载频道
-        LoaderManager.getInstance(this).initLoader(0, null, this);
     }
 
     private void hideLegacyViews() {
@@ -146,48 +137,41 @@ public class SettingsActivity extends AppCompatActivity
     }
 
     // ═════════════════════════════════════════════
-    // CursorLoader — 从 ContentProvider 读取频道
+    // 频道列表加载（从 SharedPreferences）
     // ═════════════════════════════════════════════
 
-    @NonNull
-    @Override
-    public Loader<Cursor> onCreateLoader(int id, Bundle args) {
-        return new CursorLoader(this,
-                ChannelProvider.CONTENT_URI,
-                new String[]{ChannelProvider.COL_ID, ChannelProvider.COL_DIALOG_ID,
-                        ChannelProvider.COL_NAME, ChannelProvider.COL_LAST_SEEN},
-                null, null,
-                ChannelProvider.COL_LAST_SEEN + " DESC");
-    }
-
-    @Override
-    public void onLoadFinished(@NonNull Loader<Cursor> loader, Cursor data) {
+    private void refreshChannelList() {
         List<ChannelInfo> channels = new ArrayList<>();
-        Set<Long> channelIds = new HashSet<>();
 
-        if (data != null && data.moveToFirst()) {
-            do {
-                long dialogId = data.getLong(data.getColumnIndexOrThrow(ChannelProvider.COL_DIALOG_ID));
-                String name = data.getString(data.getColumnIndexOrThrow(ChannelProvider.COL_NAME));
-                long lastSeen = data.getLong(data.getColumnIndexOrThrow(ChannelProvider.COL_LAST_SEEN));
-                channelIds.add(dialogId);
+        try {
+            String json = ChannelReceiver.getChannelsJson(this);
+            JSONObject obj = new JSONObject(json);
 
-                // 查看该频道是否已有过滤规则
-                Set<String> keywords = getChannelKeywords(dialogId);
-                channels.add(new ChannelInfo(dialogId, name, lastSeen, keywords));
-            } while (data.moveToNext());
+            Iterator<String> keys = obj.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                try {
+                    long dialogId = Long.parseLong(key);
+                    JSONObject ch = obj.getJSONObject(key);
+                    String name = ch.optString("name", String.valueOf(dialogId));
+                    long lastSeen = ch.optLong("last_seen", 0);
+
+                    Set<String> keywords = getChannelKeywords(dialogId);
+                    channels.add(new ChannelInfo(dialogId, name, lastSeen, keywords));
+                } catch (NumberFormatException ignored) {}
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to load discovered channels", e);
         }
 
+        // 按 lastSeen 倒序
+        channels.sort((a, b) -> Long.compare(b.lastSeen, a.lastSeen));
+
         if (textChannelCount != null) {
-            textChannelCount.setText("已发现 " + channelIds.size() + " 个频道");
+            textChannelCount.setText("已发现 " + channels.size() + " 个频道");
         }
 
         channelAdapter.submitList(channels);
-    }
-
-    @Override
-    public void onLoaderReset(@NonNull Loader<Cursor> loader) {
-        channelAdapter.submitList(new ArrayList<>());
     }
 
     // ═════════════════════════════════════════════
@@ -213,13 +197,8 @@ public class SettingsActivity extends AppCompatActivity
             }
 
             refreshWhitelistCount();
-            // 触发 CursorLoader 重新加载（合并过滤规则信息）
-            LoaderManager.getInstance(this).restartLoader(0, null, this);
+            refreshChannelList();
         });
-    }
-
-    private void refreshChannelList() {
-        LoaderManager.getInstance(this).restartLoader(0, null, this);
     }
 
     private void refreshWhitelistCount() {
@@ -405,10 +384,7 @@ public class SettingsActivity extends AppCompatActivity
                         .setTitle("删除频道")
                         .setMessage("从发现列表中移除「" + (info.name != null ? info.name : info.id) + "」？\n（不会删除已配置的过滤规则）")
                         .setPositiveButton("移除", (d, which) -> {
-                            getContentResolver().delete(
-                                    ChannelProvider.CONTENT_URI,
-                                    ChannelProvider.COL_DIALOG_ID + "=?",
-                                    new String[]{String.valueOf(info.id)});
+                            removeDiscoveredChannel(info.id);
                             refreshChannelList();
                         })
                         .setNegativeButton("取消", null)
@@ -434,6 +410,23 @@ public class SettingsActivity extends AppCompatActivity
                 textWhitelist = itemView.findViewById(R.id.text_whitelist_badge);
                 btnDelete = itemView.findViewById(R.id.btn_delete_channel);
             }
+        }
+    }
+
+    // ═════════════════════════════════════════════
+    // 发现频道删除
+    // ═════════════════════════════════════════════
+
+    private void removeDiscoveredChannel(long dialogId) {
+        try {
+            SharedPreferences.Editor editor = discoveredPrefs.edit();
+            String json = discoveredPrefs.getString("channels_json", "{}");
+            JSONObject channels = new JSONObject(json);
+            channels.remove(String.valueOf(dialogId));
+            editor.putString("channels_json", channels.toString());
+            editor.apply();
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to remove discovered channel", e);
         }
     }
 }

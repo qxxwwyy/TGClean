@@ -2,8 +2,10 @@ package com.tgclean.hooks;
 
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.ComponentName;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.net.Uri;
 import android.util.Log;
 import android.view.View;
@@ -17,8 +19,8 @@ import io.github.libxposed.api.XposedModule;
  * ChatActivity Hook — 菜单注入 + 频道自动发现
  *
  * 1. 注入「📋 复制聊天ID」菜单项
- * 2. 每次 onResume 时自动将当前频道信息写入 TGClean ChannelProvider
- *    （跨进程 ContentProvider IPC，不需要任何特殊权限）
+ * 2. 每次 onResume 时通过 BroadcastReceiver 发送频道信息到 TGClean App
+ *    （component-explicit broadcast，绕过 Android 11+ package visibility 限制）
  */
 public class ChatHelperHook {
     private static final String TAG = "TGClean-ChatHelper";
@@ -26,20 +28,16 @@ public class ChatHelperHook {
     private static final int MENU_ID_COPY_CHAT_ID = 999002;
     private static final String TAG_INJECTED = "tgclean_injected";
 
-    // ChannelProvider URI
-    private static final Uri CHANNEL_PROVIDER_URI = Uri.parse(
-            "content://com.tgclean.provider.channels/discovered");
-
-    // 列名
-    private static final String COL_DIALOG_ID = "dialog_id";
-    private static final String COL_NAME = "name";
-    private static final String COL_LAST_SEEN = "last_seen";
+    // BroadcastReceiver 目标
+    private static final String TG_CLEAN_PACKAGE = "com.tgclean";
+    private static final String RECEIVER_CLASS = "com.tgclean.receiver.ChannelReceiver";
+    private static final String ACTION = "com.tgclean.ACTION_CHANNEL_DISCOVERED";
 
     private static volatile Field cachedHeaderItemField;
     private static volatile Field cachedDialogIdField;
     private static volatile Field cachedCurrentAccountField;
 
-    // 防止高频写入（同一频道 30 秒内不重复写入）
+    // 防止高频写入（同一频道 30 秒内不重复发送）
     private static volatile long lastReportedDialogId = 0;
     private static volatile long lastReportTime = 0;
     private static final long REPORT_COOLDOWN_MS = 30_000;
@@ -72,8 +70,8 @@ public class ChatHelperHook {
                     int accountIdx = getCurrentAccount(chatActivity, tgCl);
                     String channelName = resolveChannelName(dialogId, accountIdx, tgCl);
 
-                    // 自动上报频道信息到 ContentProvider
-                    reportChannelToProvider(context, dialogId, channelName);
+                    // 自动上报频道信息到 TGClean App（广播）
+                    reportChannelViaBroadcast(context, dialogId, channelName);
 
                     // 注入菜单
                     injectIfNeeded(chatActivity, tgCl, module);
@@ -91,39 +89,36 @@ public class ChatHelperHook {
     }
 
     /**
-     * 通过 ContentProvider 跨进程写入频道信息
+     * 通过 Component-explicit broadcast 发送频道信息到 TGClean App
+     *
+     * Component-explicit broadcast 不受 Android 11+ package visibility 限制，
+     * 因为 AMS 内部使用 MATCH_ALL 查询 component。
      */
-    private static void reportChannelToProvider(Context context, long dialogId, String name) {
+    private static void reportChannelViaBroadcast(Context context, long dialogId, String name) {
         long now = System.currentTimeMillis();
 
-        // 同一频道 30 秒内不重复写入（避免 onResume 频繁触发）
+        // 同一频道 30 秒内不重复发送（避免 onResume 频繁触发）
         if (dialogId == lastReportedDialogId && (now - lastReportTime) < REPORT_COOLDOWN_MS) {
             return;
         }
 
         try {
-            // 诊断：检查 ContentProvider 是否可达
-            try {
-                android.content.pm.ProviderInfo pi = context.getPackageManager()
-                        .resolveContentProvider("com.tgclean.provider.channels", 0);
-                Log.i(TAG, "ProviderInfo: " + (pi != null ? pi.packageName + " / " + pi.authority : "NULL"));
-            } catch (Throwable diag) {
-                Log.e(TAG, "Diag resolveContentProvider: " + diag.getMessage());
-            }
+            Intent intent = new Intent(ACTION);
+            // 使用 ComponentName 发送显式广播
+            intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
+            intent.putExtra("dialog_id", dialogId);
+            intent.putExtra("name", name != null ? name : String.valueOf(dialogId));
+            intent.putExtra("last_seen", now);
 
-            ContentValues values = new ContentValues();
-            values.put(COL_DIALOG_ID, dialogId);
-            values.put(COL_NAME, name != null ? name : String.valueOf(dialogId));
-            values.put(COL_LAST_SEEN, now);
-
-            android.net.Uri result = context.getContentResolver().insert(CHANNEL_PROVIDER_URI, values);
+            // sendBroadcast 在 TG 进程中发送，AMS 路由到 TGClean App
+            context.sendBroadcast(intent);
 
             lastReportedDialogId = dialogId;
             lastReportTime = now;
 
-            Log.i(TAG, "Reported channel to provider: " + dialogId + " (" + name + ") result=" + result);
+            Log.i(TAG, "Broadcast channel sent: " + dialogId + " (" + name + ")");
         } catch (Throwable t) {
-            Log.e(TAG, "Failed to report channel to provider: " + t.getMessage(), t);
+            Log.e(TAG, "Failed to send channel broadcast: " + t.getMessage());
         }
     }
 

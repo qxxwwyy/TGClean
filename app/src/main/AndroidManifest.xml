@@ -23,10 +23,13 @@
             android:exported="false"
             android:parentActivityName=".ui.SettingsActivity" />
 
-        <provider
-            android:name=".provider.ChannelProvider"
-            android:authorities="com.tgclean.provider.channels"
-            android:exported="true" />
+        <receiver
+            android:name=".receiver.ChannelReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.tgclean.ACTION_CHANNEL_DISCOVERED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 </manifest>
