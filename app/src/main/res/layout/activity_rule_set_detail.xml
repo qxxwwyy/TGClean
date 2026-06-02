@@ -257,7 +257,7 @@
 
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/btn_select_all"
-                            style="?attr/materialButtonTextStyle"
+                            style="?attr/borderlessButtonStyle"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="全选"
@@ -266,7 +266,7 @@
 
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/btn_select_none"
-                            style="?attr/materialButtonTextStyle"
+                            style="?attr/borderlessButtonStyle"
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
                             android:text="取消全选"
