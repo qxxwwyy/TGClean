@@ -102,7 +102,7 @@ public class ChatHelperHook {
             Object copyItem = addSubItem.invoke(headerItem, MENU_ID_COPY_CHAT_ID, 0,
                     "📋 复制聊天ID (" + dialogId + ")");
             View copyView = (View) copyItem;
-            copyView.setOnClickListener(v -> showAndCopyDialogId(context, dialogId));
+            copyView.setOnClickListener(v -> showAndCopyDialogId(context, dialogId, channelName));
 
             module.log(Log.INFO, TAG, "Injected copy-chat-ID menu (dialogId=" + dialogId
                     + ", channel=" + channelName + ")");
@@ -150,7 +150,7 @@ public class ChatHelperHook {
         }
     }
 
-    private static void showAndCopyDialogId(Context context, long dialogId) {
+    private static void showAndCopyDialogId(Context context, long dialogId, String channelName) {
         ClipboardManager clipboard = (ClipboardManager)
                 context.getSystemService(Context.CLIPBOARD_SERVICE);
         ClipData clip = ClipData.newPlainText("TGClean Chat ID",
@@ -159,7 +159,9 @@ public class ChatHelperHook {
 
         new android.app.AlertDialog.Builder(context)
                 .setTitle("TGClean")
-                .setMessage("聊天ID已复制到剪贴板：\n" + dialogId)
+                .setMessage("聊天ID已复制到剪贴板：\n" + dialogId
+                        + "\n\n频道：" + channelName
+                        + "\n\n打开 TGClean App 粘贴此ID来配置过滤规则")
                 .setPositiveButton("确定", null)
                 .show();
     }

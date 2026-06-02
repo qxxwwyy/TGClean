@@ -18,20 +18,27 @@
     <string name="global_keywords_hint">输入关键词</string>
     <string name="global_keywords_helper">每行一个关键词，匹配到的消息将被隐藏</string>
 
-    <!-- 白名单区段 -->
-    <string name="section_whitelist">白名单</string>
-    <string name="whitelist_hint">对话 ID</string>
-    <string name="whitelist_helper">白名单内的对话不会被过滤，逗号分隔</string>
-
     <!-- Reactions 区段 -->
     <string name="reactions_filter">Reactions 过滤</string>
     <string name="reactions_filter_desc">当消息收到指定表情反应超过阈值时自动隐藏</string>
     <string name="reactions_emoji_hint">表情</string>
     <string name="reactions_threshold_hint">阈值</string>
 
-    <!-- 分频道规则区段 -->
+    <!-- 频道管理 -->
+    <string name="section_channel_management">频道管理</string>
+    <string name="channel_management_desc">手动添加频道ID来配置专属过滤规则。在 Telegram 中打开目标频道，点击菜单「📋 复制聊天ID」获取ID。</string>
+    <string name="add_channel">添加频道</string>
+
+    <!-- 白名单 -->
+    <string name="section_whitelist">白名单</string>
+    <string name="whitelist_empty">暂无白名单频道</string>
+    <string name="add_whitelist">添加白名单频道</string>
+
+    <!-- 旧版（隐藏） -->
     <string name="section_channel_rules">分频道规则</string>
     <string name="channel_rules_hint">频道规则</string>
     <string name="channel_rules_helper">格式：频道ID:关键词1,关键词2，每行一条规则</string>
     <string name="paste_chat_id">从剪贴板导入聊天ID</string>
+    <string name="whitelist_hint">对话 ID</string>
+    <string name="whitelist_helper">白名单内的对话不会被过滤，逗号分隔</string>
 </resources>

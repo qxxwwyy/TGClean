@@ -18,5 +18,10 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ui.ChannelDetailActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.SettingsActivity" />
+
     </application>
 </manifest>

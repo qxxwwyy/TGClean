@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    android:orientation="horizontal"
+    android:paddingStart="8dp"
+    android:paddingEnd="8dp"
+    android:paddingTop="4dp"
+    android:paddingBottom="4dp">
+
+    <!-- 关键词文本 -->
+    <TextView
+        android:id="@+id/text_keyword"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:padding="12dp"
+        android:textAppearance="?attr/textAppearanceBodyMedium" />
+
+    <!-- 删除按钮 -->
+    <ImageButton
+        android:id="@+id/btn_delete_keyword"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:contentDescription="删除"
+        android:padding="4dp"
+        android:src="@android:drawable/ic_menu_close_clear_cancel" />
+
+</LinearLayout>
