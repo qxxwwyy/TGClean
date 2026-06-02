@@ -102,19 +102,28 @@ public class ChatHelperHook {
         }
 
         try {
+            // 诊断：检查 ContentProvider 是否可达
+            try {
+                android.content.pm.ProviderInfo pi = context.getPackageManager()
+                        .resolveContentProvider("com.tgclean.provider.channels", 0);
+                Log.i(TAG, "ProviderInfo: " + (pi != null ? pi.packageName + " / " + pi.authority : "NULL"));
+            } catch (Throwable diag) {
+                Log.e(TAG, "Diag resolveContentProvider: " + diag.getMessage());
+            }
+
             ContentValues values = new ContentValues();
             values.put(COL_DIALOG_ID, dialogId);
             values.put(COL_NAME, name != null ? name : String.valueOf(dialogId));
             values.put(COL_LAST_SEEN, now);
 
-            context.getContentResolver().insert(CHANNEL_PROVIDER_URI, values);
+            android.net.Uri result = context.getContentResolver().insert(CHANNEL_PROVIDER_URI, values);
 
             lastReportedDialogId = dialogId;
             lastReportTime = now;
 
-            Log.i(TAG, "Reported channel to provider: " + dialogId + " (" + name + ")");
+            Log.i(TAG, "Reported channel to provider: " + dialogId + " (" + name + ") result=" + result);
         } catch (Throwable t) {
-            Log.e(TAG, "Failed to report channel to provider: " + t.getMessage());
+            Log.e(TAG, "Failed to report channel to provider: " + t.getMessage(), t);
         }
     }
 
