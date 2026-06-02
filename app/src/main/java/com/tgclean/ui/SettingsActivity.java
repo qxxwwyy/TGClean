@@ -3,6 +3,7 @@ package com.tgclean.ui;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.os.Bundle;
 import android.util.Log;
 import android.view.LayoutInflater;
@@ -14,6 +15,9 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.loader.app.LoaderManager;
+import androidx.loader.content.CursorLoader;
+import androidx.loader.content.Loader;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
@@ -25,6 +29,7 @@ import com.google.android.material.textfield.TextInputEditText;
 import com.tgclean.App;
 import com.tgclean.R;
 import com.tgclean.config.FilterConfigWriter;
+import com.tgclean.provider.ChannelProvider;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -40,12 +45,13 @@ import java.util.Set;
 import io.github.libxposed.service.XposedService;
 
 /**
- * TGClean Material You 设置界面
+ * TGClean 设置界面
  *
- * 全局设置 + 频道管理（手动添加频道ID → 配置关键词/白名单）
- * 所有写操作通过 XposedService.getRemotePreferences().edit() 完成。
+ * 频道列表从 ContentProvider 自动获取（Hook 端通过 TG 自动发现）。
+ * 全局设置 + 频道管理 + 白名单。
  */
-public class SettingsActivity extends AppCompatActivity {
+public class SettingsActivity extends AppCompatActivity
+        implements LoaderManager.LoaderCallbacks<Cursor> {
 
     private static final String TAG = "TGClean-Settings";
     private static final String PREFS_NAME = "tgclean_config";
@@ -64,17 +70,11 @@ public class SettingsActivity extends AppCompatActivity {
     // ─── 频道管理 ───
     private RecyclerView recyclerViewChannels;
     private ChannelListAdapter channelAdapter;
-    private MaterialButton btnAddChannel;
     private MaterialButton btnAddWhitelist;
     private TextView textWhitelistCount;
+    private TextView textChannelCount;
 
     private SharedPreferences remotePrefs = null;
-    private boolean localEnabled = true;
-    private boolean localRegex = false;
-    private boolean localReactionsEnabled = false;
-    private String localKeywords = "";
-    private String localReactionsEmoji = "👎";
-    private int localReactionsThreshold = 10;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -105,9 +105,9 @@ public class SettingsActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        // 从频道详情页返回时刷新频道列表
         if (remotePrefs != null) {
             refreshChannelList();
+            refreshWhitelistCount();
         }
     }
 
@@ -120,18 +120,19 @@ public class SettingsActivity extends AppCompatActivity {
         editReactionsThreshold = findViewById(R.id.edit_reactions_threshold);
         btnSave = findViewById(R.id.btn_save);
 
-        // 隐藏旧的频道规则/白名单文本框
         hideLegacyViews();
 
-        // 频道管理 RecyclerView
         recyclerViewChannels = findViewById(R.id.recycler_channels);
         recyclerViewChannels.setLayoutManager(new LinearLayoutManager(this));
         channelAdapter = new ChannelListAdapter();
         recyclerViewChannels.setAdapter(channelAdapter);
 
-        btnAddChannel = findViewById(R.id.btn_add_channel);
         btnAddWhitelist = findViewById(R.id.btn_add_whitelist);
         textWhitelistCount = findViewById(R.id.text_whitelist_count);
+        textChannelCount = findViewById(R.id.text_channel_count);
+
+        // 启动 CursorLoader 自动从 ContentProvider 加载频道
+        LoaderManager.getInstance(this).initLoader(0, null, this);
     }
 
     private void hideLegacyViews() {
@@ -144,84 +145,126 @@ public class SettingsActivity extends AppCompatActivity {
         if (pasteBtn != null) pasteBtn.setVisibility(View.GONE);
     }
 
+    // ═════════════════════════════════════════════
+    // CursorLoader — 从 ContentProvider 读取频道
+    // ═════════════════════════════════════════════
+
+    @NonNull
+    @Override
+    public Loader<Cursor> onCreateLoader(int id, Bundle args) {
+        return new CursorLoader(this,
+                ChannelProvider.CONTENT_URI,
+                new String[]{ChannelProvider.COL_ID, ChannelProvider.COL_DIALOG_ID,
+                        ChannelProvider.COL_NAME, ChannelProvider.COL_LAST_SEEN},
+                null, null,
+                ChannelProvider.COL_LAST_SEEN + " DESC");
+    }
+
+    @Override
+    public void onLoadFinished(@NonNull Loader<Cursor> loader, Cursor data) {
+        List<ChannelInfo> channels = new ArrayList<>();
+        Set<Long> channelIds = new HashSet<>();
+
+        if (data != null && data.moveToFirst()) {
+            do {
+                long dialogId = data.getLong(data.getColumnIndexOrThrow(ChannelProvider.COL_DIALOG_ID));
+                String name = data.getString(data.getColumnIndexOrThrow(ChannelProvider.COL_NAME));
+                long lastSeen = data.getLong(data.getColumnIndexOrThrow(ChannelProvider.COL_LAST_SEEN));
+                channelIds.add(dialogId);
+
+                // 查看该频道是否已有过滤规则
+                Set<String> keywords = getChannelKeywords(dialogId);
+                channels.add(new ChannelInfo(dialogId, name, lastSeen, keywords));
+            } while (data.moveToNext());
+        }
+
+        if (textChannelCount != null) {
+            textChannelCount.setText("已发现 " + channelIds.size() + " 个频道");
+        }
+
+        channelAdapter.submitList(channels);
+    }
+
+    @Override
+    public void onLoaderReset(@NonNull Loader<Cursor> loader) {
+        channelAdapter.submitList(new ArrayList<>());
+    }
+
+    // ═════════════════════════════════════════════
+    // XposedService
+    // ═════════════════════════════════════════════
+
     private void onServiceReady(XposedService service) {
-        Log.i(TAG, "XposedService ready, loading config");
+        Log.i(TAG, "XposedService ready");
         runOnUiThread(() -> {
             if (layoutWaiting != null) layoutWaiting.setVisibility(View.GONE);
 
             try {
                 remotePrefs = service.getRemotePreferences(PREFS_NAME);
-                localEnabled = remotePrefs.getBoolean("filter_enabled", true);
-                localRegex = remotePrefs.getBoolean("use_regex", false);
-                localReactionsEnabled = remotePrefs.getBoolean("reactions_filter_enabled", false);
-                localKeywords = remotePrefs.getString("global_keywords", "");
-                localReactionsEmoji = remotePrefs.getString("reactions_filter_emoji", "👎");
-                localReactionsThreshold = remotePrefs.getInt("reactions_filter_threshold", 10);
+                switchEnabled.setChecked(remotePrefs.getBoolean("filter_enabled", true));
+                switchRegex.setChecked(remotePrefs.getBoolean("use_regex", false));
+                switchReactions.setChecked(remotePrefs.getBoolean("reactions_filter_enabled", false));
+                editKeywords.setText(remotePrefs.getString("global_keywords", ""));
+                editReactionsEmoji.setText(remotePrefs.getString("reactions_filter_emoji", "👎"));
+                editReactionsThreshold.setText(String.valueOf(
+                        remotePrefs.getInt("reactions_filter_threshold", 10)));
             } catch (Throwable t) {
-                Log.e(TAG, "Failed to load remote prefs", t);
+                Log.e(TAG, "Failed to load prefs", t);
             }
 
-            switchEnabled.setChecked(localEnabled);
-            switchRegex.setChecked(localRegex);
-            switchReactions.setChecked(localReactionsEnabled);
-            editKeywords.setText(localKeywords);
-            editReactionsEmoji.setText(localReactionsEmoji);
-            editReactionsThreshold.setText(String.valueOf(localReactionsThreshold));
-
-            refreshChannelList();
+            refreshWhitelistCount();
+            // 触发 CursorLoader 重新加载（合并过滤规则信息）
+            LoaderManager.getInstance(this).restartLoader(0, null, this);
         });
     }
 
     private void refreshChannelList() {
-        List<ChannelInfo> channels = loadChannelList();
-        channelAdapter.submitList(channels);
+        LoaderManager.getInstance(this).restartLoader(0, null, this);
+    }
 
-        Set<Long> whitelist = loadWhitelist();
-        int wlCount = whitelist.size();
+    private void refreshWhitelistCount() {
+        Set<Long> wl = getWhitelist();
         if (textWhitelistCount != null) {
-            textWhitelistCount.setText(wlCount > 0
-                    ? wlCount + " 个频道在白名单中"
+            textWhitelistCount.setText(wl.size() > 0
+                    ? wl.size() + " 个频道在白名单中"
                     : "暂无白名单频道");
         }
     }
 
-    private List<ChannelInfo> loadChannelList() {
-        List<ChannelInfo> channels = new ArrayList<>();
-        if (remotePrefs == null) return channels;
+    // ═════════════════════════════════════════════
+    // 配置读写
+    // ═════════════════════════════════════════════
 
+    private Set<String> getChannelKeywords(long dialogId) {
+        Set<String> keywords = new HashSet<>();
+        if (remotePrefs == null) return keywords;
         try {
             String raw = remotePrefs.getString("channel_rules", "");
             if (raw != null && raw.trim().startsWith("{")) {
                 JSONObject json = new JSONObject(raw);
-                Iterator<String> keys = json.keys();
-                while (keys.hasNext()) {
-                    String key = keys.next();
-                    long id = Long.parseLong(key);
+                String key = String.valueOf(dialogId);
+                if (json.has(key)) {
                     JSONArray arr = json.getJSONArray(key);
-                    Set<String> keywords = new HashSet<>();
                     for (int i = 0; i < arr.length(); i++) {
                         String kw = arr.getString(i).trim();
                         if (!kw.isEmpty()) keywords.add(kw);
                     }
-                    channels.add(new ChannelInfo(id, keywords));
                 }
             }
         } catch (Exception e) {
-            Log.e(TAG, "Failed to load channel list", e);
+            Log.e(TAG, "Failed to load keywords for " + dialogId, e);
         }
-        return channels;
+        return keywords;
     }
 
-    private Set<Long> loadWhitelist() {
+    private Set<Long> getWhitelist() {
         Set<Long> whitelist = new HashSet<>();
         if (remotePrefs == null) return whitelist;
         try {
             String raw = remotePrefs.getString("whitelist", "");
             if (raw != null && raw.trim().startsWith("[")) {
                 JSONArray arr = new JSONArray(raw);
-                for (int i = 0; i < arr.length(); i++) {
-                    whitelist.add(arr.getLong(i));
-                }
+                for (int i = 0; i < arr.length(); i++) whitelist.add(arr.getLong(i));
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to load whitelist", e);
@@ -231,9 +274,6 @@ public class SettingsActivity extends AppCompatActivity {
 
     private void setupListeners() {
         btnSave.setOnClickListener(v -> saveSettings());
-        if (btnAddChannel != null) {
-            btnAddChannel.setOnClickListener(v -> showAddChannelDialog());
-        }
         if (btnAddWhitelist != null) {
             btnAddWhitelist.setOnClickListener(v -> showAddWhitelistDialog());
         }
@@ -252,8 +292,7 @@ public class SettingsActivity extends AppCompatActivity {
         writer.setReactionsFilterEnabled(switchReactions.isChecked());
 
         Set<String> keywords = new HashSet<>();
-        String text = editKeywords.getText().toString();
-        for (String line : text.split("\n")) {
+        for (String line : editKeywords.getText().toString().split("\n")) {
             String trimmed = line.trim();
             if (!trimmed.isEmpty()) keywords.add(trimmed);
         }
@@ -261,61 +300,14 @@ public class SettingsActivity extends AppCompatActivity {
 
         writer.setReactionsFilterEmoji(editReactionsEmoji.getText().toString());
         try {
-            int threshold = Integer.parseInt(editReactionsThreshold.getText().toString());
-            writer.setReactionsFilterThreshold(threshold);
+            writer.setReactionsFilterThreshold(
+                    Integer.parseInt(editReactionsThreshold.getText().toString()));
         } catch (NumberFormatException e) {
             writer.setReactionsFilterThreshold(10);
         }
 
         Snackbar.make(findViewById(android.R.id.content),
                 getString(R.string.config_saved), Snackbar.LENGTH_SHORT).show();
-    }
-
-    // ═════════════════════════════════════════════
-    // 添加频道对话框
-    // ═════════════════════════════════════════════
-
-    private void showAddChannelDialog() {
-        View dialogView = LayoutInflater.from(this)
-                .inflate(R.layout.dialog_add_channel, null);
-        TextInputEditText editId = dialogView.findViewById(R.id.edit_channel_id);
-
-        new MaterialAlertDialogBuilder(this)
-                .setTitle("添加频道")
-                .setView(dialogView)
-                .setPositiveButton("添加", (d, which) -> {
-                    String input = editId.getText().toString().trim();
-                    if (input.isEmpty()) {
-                        Snackbar.make(findViewById(android.R.id.content),
-                                "请输入频道ID", Snackbar.LENGTH_SHORT).show();
-                        return;
-                    }
-                    try {
-                        // 支持粘贴 "复制聊天ID (-1001234567890)" 格式
-                        long id = Long.parseLong(input.replaceAll("[^0-9-]", ""));
-                        if (id == 0) throw new NumberFormatException();
-
-                        // 创建空规则（用户进入详情页后添加关键词）
-                        FilterConfigWriter writer = new FilterConfigWriter(remotePrefs);
-                        Map<Long, Set<String>> rules = new HashMap<>();
-                        // 保留已有规则
-                        List<ChannelInfo> existing = loadChannelList();
-                        for (ChannelInfo ci : existing) {
-                            rules.put(ci.id, ci.keywords);
-                        }
-                        rules.putIfAbsent(id, new HashSet<>());
-                        writer.setChannelRules(rules);
-
-                        refreshChannelList();
-                        Snackbar.make(findViewById(android.R.id.content),
-                                "已添加频道: " + id, Snackbar.LENGTH_SHORT).show();
-                    } catch (NumberFormatException e) {
-                        Snackbar.make(findViewById(android.R.id.content),
-                                "无效的频道ID", Snackbar.LENGTH_SHORT).show();
-                    }
-                })
-                .setNegativeButton("取消", null)
-                .show();
     }
 
     private void showAddWhitelistDialog() {
@@ -335,10 +327,11 @@ public class SettingsActivity extends AppCompatActivity {
                         if (id == 0) throw new NumberFormatException();
 
                         FilterConfigWriter writer = new FilterConfigWriter(remotePrefs);
-                        Set<Long> wl = loadWhitelist();
+                        Set<Long> wl = getWhitelist();
                         wl.add(id);
                         writer.setWhitelist(wl);
 
+                        refreshWhitelistCount();
                         refreshChannelList();
                         Snackbar.make(findViewById(android.R.id.content),
                                 "已加入白名单: " + id, Snackbar.LENGTH_SHORT).show();
@@ -357,11 +350,15 @@ public class SettingsActivity extends AppCompatActivity {
 
     static class ChannelInfo {
         final long id;
+        final String name;
+        final long lastSeen;
         final Set<String> keywords;
         boolean whitelisted;
 
-        ChannelInfo(long id, Set<String> keywords) {
+        ChannelInfo(long id, String name, long lastSeen, Set<String> keywords) {
             this.id = id;
+            this.name = name;
+            this.lastSeen = lastSeen;
             this.keywords = keywords;
         }
     }
@@ -386,27 +383,32 @@ public class SettingsActivity extends AppCompatActivity {
         @Override
         public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
             ChannelInfo info = items.get(position);
-            holder.textChannelId.setText(String.valueOf(info.id));
-            holder.textKeywordCount.setText(info.keywords.size() + " 条关键词");
+            holder.textChannelId.setText(info.name != null ? info.name : String.valueOf(info.id));
+            holder.textKeywordCount.setText(info.keywords.size() > 0
+                    ? info.keywords.size() + " 条关键词"
+                    : "未配置规则");
 
-            // 判断是否在白名单
-            Set<Long> whitelist = loadWhitelist();
+            Set<Long> whitelist = getWhitelist();
             info.whitelisted = whitelist.contains(info.id);
             holder.textWhitelist.setVisibility(info.whitelisted ? View.VISIBLE : View.GONE);
 
             holder.itemView.setOnClickListener(v -> {
                 Intent intent = new Intent(SettingsActivity.this, ChannelDetailActivity.class);
                 intent.putExtra(ChannelDetailActivity.EXTRA_DIALOG_ID, info.id);
+                intent.putExtra(ChannelDetailActivity.EXTRA_CHANNEL_NAME, info.name != null ? info.name : "");
                 startActivity(intent);
             });
 
+            // 长按删除发现记录（不影响过滤规则）
             holder.btnDelete.setOnClickListener(v -> {
                 new MaterialAlertDialogBuilder(SettingsActivity.this)
-                        .setTitle("删除频道规则")
-                        .setMessage("确定删除频道 " + info.id + " 的过滤规则？")
-                        .setPositiveButton("删除", (d, which) -> {
-                            FilterConfigWriter writer = new FilterConfigWriter(remotePrefs);
-                            writer.removeChannelRule(info.id);
+                        .setTitle("删除频道")
+                        .setMessage("从发现列表中移除「" + (info.name != null ? info.name : info.id) + "」？\n（不会删除已配置的过滤规则）")
+                        .setPositiveButton("移除", (d, which) -> {
+                            getContentResolver().delete(
+                                    ChannelProvider.CONTENT_URI,
+                                    ChannelProvider.COL_DIALOG_ID + "=?",
+                                    new String[]{String.valueOf(info.id)});
                             refreshChannelList();
                         })
                         .setNegativeButton("取消", null)

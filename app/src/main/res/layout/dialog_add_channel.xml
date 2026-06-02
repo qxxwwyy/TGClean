@@ -11,7 +11,7 @@
         style="?attr/textInputOutlinedStyle"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="频道 ID（从 Telegram 复制）">
+        android:hint="频道ID（从 Telegram 复制）">
 
         <com.google.android.material.textfield.TextInputEditText
             android:id="@+id/edit_channel_id"

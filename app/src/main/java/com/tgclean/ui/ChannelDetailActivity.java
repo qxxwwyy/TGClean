@@ -1,5 +1,6 @@
 package com.tgclean.ui;
 
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.util.Log;
@@ -49,6 +50,7 @@ public class ChannelDetailActivity extends AppCompatActivity {
 
     private static final String TAG = "TGClean-ChannelDetail";
     static final String EXTRA_DIALOG_ID = "dialog_id";
+    static final String EXTRA_CHANNEL_NAME = "channel_name";
     private static final String PREFS_NAME = "tgclean_config";
 
     private long dialogId;
@@ -92,7 +94,8 @@ public class ChannelDetailActivity extends AppCompatActivity {
 
     private void initViews() {
         toolbar = findViewById(R.id.toolbar);
-        toolbar.setTitle("频道 " + dialogId);
+        String channelName = getIntent().getStringExtra(EXTRA_CHANNEL_NAME);
+        toolbar.setTitle((channelName != null && !channelName.isEmpty() ? channelName : "频道") + " " + dialogId);
         toolbar.setNavigationOnClickListener(v -> finish());
 
         switchWhitelist = findViewById(R.id.switch_whitelist);

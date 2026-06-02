@@ -26,8 +26,9 @@
 
     <!-- 频道管理 -->
     <string name="section_channel_management">频道管理</string>
-    <string name="channel_management_desc">手动添加频道ID来配置专属过滤规则。在 Telegram 中打开目标频道，点击菜单「📋 复制聊天ID」获取ID。</string>
+    <string name="channel_management_desc">在 Telegram 中打开目标频道后会自动出现在此列表中。点击频道可配置专属过滤规则。</string>
     <string name="add_channel">添加频道</string>
+    <string name="discovered_channels">已发现 0 个频道</string>
 
     <!-- 白名单 -->
     <string name="section_whitelist">白名单</string>
