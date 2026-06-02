@@ -224,11 +224,12 @@ public class TGCleanSheet {
         }
 
         void build() {
-            // 使用 Telegram 的 ClassLoader 加载 Material BottomSheetDialog
-            // 不能用 Class.forName()——模块的 ClassLoader 看不到宿主 APK 的类
+            // BottomSheetDialog 是 Material Design 库类，打包在模块 APK 里
+            // 必须用模块自己的 ClassLoader 加载（不是 tgClassLoader）
             try {
-                Class<?> bsdClass = tgClassLoader.loadClass(
-                        "com.google.android.material.bottomsheet.BottomSheetDialog");
+                Class<?> bsdClass = Class.forName(
+                        "com.google.android.material.bottomsheet.BottomSheetDialog",
+                        true, TGCleanSheet.class.getClassLoader());
                 Constructor<?> ctor = bsdClass.getConstructor(Context.class);
                 Object dialog = ctor.newInstance(context);
                 dialogRef = dialog; // 保存引用
