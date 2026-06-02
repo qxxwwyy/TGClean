@@ -1,6 +1,5 @@
 package com.tgclean.hooks;
 
-import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -13,16 +12,19 @@ import java.lang.reflect.Method;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * ChatActivity 增强：复制聊天ID功能
+ * ChatActivity 增强：菜单注入 — "🧹 过滤设置" + "📋 复制聊天ID"
  *
  * exteraGram 的 onCreateOptionsMenu 签名可能与标准Telegram不同，
  * 因此使用 hookAllMethods 策略扫描所有 onCreateOptionsMenu 重载。
+ *
+ * v2: 新增 TGCleanSheet 入口，自动获取 dialogId + accountIdx + channelName
  */
 public class ChatHelperHook {
     private static final String TAG = "TGClean-ChatHelper";
 
     // 缓存反射字段
     private static volatile Field cachedDialogIdField;
+    private static volatile Field cachedCurrentAccountField;
 
     public static void hook(ClassLoader cl, XposedModule module) {
         hookOnCreateOptionsMenu(cl, module);
@@ -32,13 +34,11 @@ public class ChatHelperHook {
         try {
             Class<?> chatActivityClass = cl.loadClass("org.telegram.ui.ChatActivity");
 
-            // 扫描所有 onCreateOptionsMenu 重载（适配exteraGram签名差异）
             Method[] methods = chatActivityClass.getDeclaredMethods();
             int hookedCount = 0;
             for (Method m : methods) {
                 if (!"onCreateOptionsMenu".equals(m.getName())) continue;
                 Class<?>[] params = m.getParameterTypes();
-                // 找参数中含 Menu 类的重载
                 boolean hasMenu = false;
                 for (Class<?> p : params) {
                     if (Menu.class.isAssignableFrom(p)) {
@@ -48,7 +48,6 @@ public class ChatHelperHook {
                 }
                 if (!hasMenu) continue;
 
-                // 找Menu参数的位置
                 final int menuParamIndex = findMenuParamIndex(params);
 
                 try {
@@ -66,12 +65,39 @@ public class ChatHelperHook {
                             Context context = getActivityContext(chatActivity);
                             if (context == null) return result;
 
-                            menu.add(Menu.NONE, Menu.FIRST, Menu.CATEGORY_SECONDARY,
+                            int accountIdx = getCurrentAccount(chatActivity, cl);
+
+                            // 1. TGClean 过滤设置（主入口）
+                            String channelName = resolveChannelName(dialogId, accountIdx, cl);
+                            menu.add(Menu.NONE, Menu.FIRST + 1, Menu.CATEGORY_SECONDARY,
+                                    "🧹 过滤设置 (" + channelName + ")")
+                                    .setOnMenuItemClickListener(item -> {
+                                        try {
+                                            // 延迟调用确保 UI 线程
+                                            android.os.Handler handler = new android.os.Handler(
+                                                    android.os.Looper.getMainLooper());
+                                            handler.post(() -> {
+                                                try {
+                                                    com.tgclean.ui.TGCleanSheet.showChannelSheet(
+                                                            context, dialogId, accountIdx, channelName);
+                                                } catch (Throwable t) {
+                                                    Log.e(TAG, "Failed to open TGCleanSheet", t);
+                                                }
+                                            });
+                                        } catch (Throwable t) {
+                                            Log.e(TAG, "Failed to schedule TGCleanSheet", t);
+                                        }
+                                        return true;
+                                    });
+
+                            // 2. 复制聊天ID（保留为高级功能）
+                            menu.add(Menu.NONE, Menu.FIRST + 2, Menu.CATEGORY_SECONDARY,
                                     "📋 复制聊天ID (" + dialogId + ")")
                                     .setOnMenuItemClickListener(item -> {
                                         showAndCopyDialogId(context, dialogId);
                                         return true;
                                     });
+
                         } catch (Throwable t) {
                             module.log(Log.ERROR, TAG, "Error in onCreateOptionsMenu hook", t);
                         }
@@ -95,6 +121,20 @@ public class ChatHelperHook {
         }
     }
 
+    /**
+     * 通过反射解析频道名称
+     */
+    private static String resolveChannelName(long dialogId, int accountIdx, ClassLoader cl) {
+        try {
+            Class<?> dialogObjClass = cl.loadClass("org.telegram.messenger.DialogObject");
+            // DialogObject.getName(int currentAccount, long dialogId)
+            Method getName = dialogObjClass.getMethod("getName", int.class, long.class);
+            return (String) getName.invoke(null, accountIdx, dialogId);
+        } catch (Throwable t) {
+            return String.valueOf(dialogId);
+        }
+    }
+
     private static int findMenuParamIndex(Class<?>[] params) {
         for (int i = 0; i < params.length; i++) {
             if (Menu.class.isAssignableFrom(params[i])) return i;
@@ -109,17 +149,15 @@ public class ChatHelperHook {
                 String.valueOf(dialogId));
         clipboard.setPrimaryClip(clip);
 
-        new AlertDialog.Builder(context)
+        new android.app.AlertDialog.Builder(context)
                 .setTitle("TGClean")
-                .setMessage("聊天ID已复制到剪贴板：\n" + dialogId + "\n\n"
-                        + "可在 TGClean 设置 → 分频道规则中粘贴使用。")
+                .setMessage("聊天ID已复制到剪贴板：\n" + dialogId)
                 .setPositiveButton("确定", null)
                 .show();
     }
 
     private static long getDialogId(Object chatActivity, ClassLoader cl) {
         try {
-            // 方法1: 直接读 dialogId 字段（使用缓存）
             if (cachedDialogIdField != null) {
                 try {
                     return cachedDialogIdField.getLong(chatActivity);
@@ -129,7 +167,7 @@ public class ChatHelperHook {
             }
 
             Field dialogIdField = findFieldInHierarchy(
-                    chatActivity.getClass(), "dialogId");
+                    chatActivity.getClass(), "dialog_id");
             if (dialogIdField != null) {
                 dialogIdField.setAccessible(true);
                 cachedDialogIdField = dialogIdField;
@@ -137,7 +175,7 @@ public class ChatHelperHook {
                 if (id != 0) return id;
             }
 
-            // 方法2: getCurrentChat() → chat.id → -chatId
+            // Fallback: getCurrentChat() → chat.id → -chatId
             Method getCurrentChat = findMethod(chatActivity.getClass(), "getCurrentChat");
             if (getCurrentChat != null) {
                 Object chat = getCurrentChat.invoke(chatActivity);
@@ -152,6 +190,28 @@ public class ChatHelperHook {
                     } catch (NoSuchFieldException ignored) {
                     }
                 }
+            }
+        } catch (Throwable t) {
+            // ignore
+        }
+        return 0;
+    }
+
+    private static int getCurrentAccount(Object chatActivity, ClassLoader cl) {
+        try {
+            if (cachedCurrentAccountField != null) {
+                try {
+                    return cachedCurrentAccountField.getInt(chatActivity);
+                } catch (IllegalAccessException ignored) {
+                    cachedCurrentAccountField = null;
+                }
+            }
+
+            Field field = findFieldInHierarchy(chatActivity.getClass(), "currentAccount");
+            if (field != null) {
+                field.setAccessible(true);
+                cachedCurrentAccountField = field;
+                return field.getInt(chatActivity);
             }
         } catch (Throwable t) {
             // ignore

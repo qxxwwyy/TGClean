@@ -1,5 +1,7 @@
 package com.tgclean.filter;
 
+import android.content.SharedPreferences;
+
 import com.tgclean.config.FilterConfig;
 
 import java.util.ArrayList;
@@ -33,9 +35,16 @@ public class KeywordEngine {
     // 白名单对话（不过滤）
     private Set<Long> whitelist = new HashSet<>();
 
+    // 必须存为字段，否则 lambda 被 WeakReference 引用后会被 GC 回收
+    private final android.content.SharedPreferences.OnSharedPreferenceChangeListener prefChangeListener;
+
     public KeywordEngine(FilterConfig config) {
         this.config = config;
         loadRules();
+
+        // 监听配置变更，自动重载规则（TGCleanSheet UI 修改配置时触发）
+        this.prefChangeListener = (prefs, key) -> loadRules();
+        config.getPrefs().registerOnSharedPreferenceChangeListener(prefChangeListener);
     }
 
     /**
