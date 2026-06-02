@@ -4,7 +4,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.util.Log;
-import android.view.Menu;
+import android.view.View;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -12,101 +12,152 @@ import java.lang.reflect.Method;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * ChatActivity 增强：菜单注入 — "🧹 过滤设置" + "📋 复制聊天ID"
+ * ChatActivity 菜单注入 — "🧹 过滤设置"
  *
- * exteraGram 的 onCreateOptionsMenu 签名可能与标准Telegram不同，
- * 因此使用 hookAllMethods 策略扫描所有 onCreateOptionsMenu 重载。
+ * exteraGram 不使用标准 Android onCreateOptionsMenu，
+ * 而是用 ActionBarMenuItem.lazilyAddSubItem() 构建菜单。
  *
- * v2: 新增 TGCleanSheet 入口，自动获取 dialogId + accountIdx + channelName
+ * hook 策略：
+ * 1. hook ChatActivity.onResume() —— 此时 headerItem 已初始化
+ * 2. 反射获取 headerItem 字段（ActionBarMenuItem）
+ * 3. 用 headerItem.addSubItem() 返回 ActionBarMenuSubItem（View）
+ * 4. 对返回的 subItem 设置 setTag + setOnClickListener 覆盖默认行为
  */
 public class ChatHelperHook {
     private static final String TAG = "TGClean-ChatHelper";
 
-    // 缓存反射字段
+    // 自定义菜单 ID（避免与 Telegram 内部 ID 冲突）
+    private static final int MENU_ID_FILTER_SETTINGS = 999001;
+    private static final int MENU_ID_COPY_CHAT_ID = 999002;
+
+    // 标记 tag，防止重复注入
+    private static final String TAG_INJECTED = "tgclean_injected";
+
+    private static volatile Field cachedHeaderItemField;
     private static volatile Field cachedDialogIdField;
     private static volatile Field cachedCurrentAccountField;
 
     public static void hook(ClassLoader cl, XposedModule module) {
-        hookOnCreateOptionsMenu(cl, module);
+        try {
+            hookOnResume(cl, module);
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "Failed to setup ChatHelperHook", t);
+        }
     }
 
-    private static void hookOnCreateOptionsMenu(ClassLoader cl, XposedModule module) {
+    private static void hookOnResume(ClassLoader cl, XposedModule module) {
         try {
             Class<?> chatActivityClass = cl.loadClass("org.telegram.ui.ChatActivity");
 
-            // 遍历继承链查找 onCreateOptionsMenu（exteraGram 可能在父类 BaseFragment 中）
-            Method target = findMethodInHierarchy(chatActivityClass, "onCreateOptionsMenu");
-            if (target == null) {
-                module.log(Log.WARN, TAG, "onCreateOptionsMenu not found in ChatActivity hierarchy");
-                return;
-            }
+            // ChatActivity 自己声明了 onResume
+            Method onResume = chatActivityClass.getDeclaredMethod("onResume");
+            onResume.setAccessible(true);
 
-            Class<?>[] params = target.getParameterTypes();
-            final int menuParamIndex = findMenuParamIndex(params);
+            module.hook(onResume).intercept(chain -> {
+                chain.proceed();
 
-            try {
-                target.setAccessible(true);
-                module.hook(target).intercept(chain -> {
-                        Object result = chain.proceed();
-                        try {
-                            Object chatActivity = chain.getThisObject();
-                            java.util.List<Object> args = chain.getArgs();
-                            Menu menu = (Menu) args.get(menuParamIndex);
+                try {
+                    Object chatActivity = chain.getThisObject();
+                    injectIfNeeded(chatActivity, cl, module);
+                } catch (Throwable t) {
+                    module.log(Log.ERROR, TAG, "Error injecting menu in onResume", t);
+                }
+            });
 
-                            long dialogId = getDialogId(chatActivity, cl);
-                            if (dialogId == 0) return result;
-
-                            Context context = getActivityContext(chatActivity);
-                            if (context == null) return result;
-
-                            int accountIdx = getCurrentAccount(chatActivity, cl);
-
-                            // 1. TGClean 过滤设置（主入口）
-                            String channelName = resolveChannelName(dialogId, accountIdx, cl);
-                            menu.add(Menu.NONE, Menu.FIRST + 1, Menu.CATEGORY_SECONDARY,
-                                    "🧹 过滤设置 (" + channelName + ")")
-                                    .setOnMenuItemClickListener(item -> {
-                                        try {
-                                            // 延迟调用确保 UI 线程
-                                            android.os.Handler handler = new android.os.Handler(
-                                                    android.os.Looper.getMainLooper());
-                                            handler.post(() -> {
-                                                try {
-                                                    com.tgclean.ui.TGCleanSheet.showChannelSheet(
-                                                            context, dialogId, accountIdx, channelName);
-                                                } catch (Throwable t) {
-                                                    Log.e(TAG, "Failed to open TGCleanSheet", t);
-                                                }
-                                            });
-                                        } catch (Throwable t) {
-                                            Log.e(TAG, "Failed to schedule TGCleanSheet", t);
-                                        }
-                                        return true;
-                                    });
-
-                            // 2. 复制聊天ID（保留为高级功能）
-                            menu.add(Menu.NONE, Menu.FIRST + 2, Menu.CATEGORY_SECONDARY,
-                                    "📋 复制聊天ID (" + dialogId + ")")
-                                    .setOnMenuItemClickListener(item -> {
-                                        showAndCopyDialogId(context, dialogId);
-                                        return true;
-                                    });
-
-                        } catch (Throwable t) {
-                            module.log(Log.ERROR, TAG, "Error in onCreateOptionsMenu hook", t);
-                        }
-                        return result;
-                    });
-                    module.log(Log.INFO, TAG, "Hooked onCreateOptionsMenu (param count: "
-                            + params.length + ", menu at index " + menuParamIndex + ")");
-            } catch (Throwable t) {
-                module.log(Log.WARN, TAG, "Failed to hook onCreateOptionsMenu: "
-                        + t.getMessage());
-            }
+            module.log(Log.INFO, TAG, "Hooked ChatActivity.onResume for menu injection");
 
         } catch (Throwable t) {
-            module.log(Log.ERROR, TAG, "Failed to hook onCreateOptionsMenu", t);
+            module.log(Log.ERROR, TAG, "Failed to hook onResume", t);
         }
+    }
+
+    /**
+     * 检查是否已注入，未注入则注入菜单项
+     */
+    private static void injectIfNeeded(Object chatActivity, ClassLoader cl, XposedModule module) {
+        try {
+            Object headerItem = getHeaderItem(chatActivity);
+            if (headerItem == null) return;
+
+            // 用 tag 防止重复注入
+            if (TAG_INJECTED.equals(View.class.cast(headerItem).getTag())) {
+                return;
+            }
+            View.class.cast(headerItem).setTag(TAG_INJECTED);
+
+            Context context = getActivityContext(chatActivity, cl);
+            if (context == null) return;
+
+            long dialogId = getDialogId(chatActivity, cl);
+            if (dialogId == 0) return;
+
+            int accountIdx = getCurrentAccount(chatActivity, cl);
+            String channelName = resolveChannelName(dialogId, accountIdx, cl);
+
+            // 调用 headerItem.addSubItem(id, icon, text) → 返回 ActionBarMenuSubItem
+            Class<?> headerItemClass = headerItem.getClass();
+            Method addSubItem = findMethodInHierarchy(headerItemClass, "addSubItem",
+                    int.class, int.class, CharSequence.class);
+            if (addSubItem == null) {
+                module.log(Log.WARN, TAG, "addSubItem(int,int,CharSequence) not found");
+                View.class.cast(headerItem).setTag(null); // 重置，下次重试
+                return;
+            }
+            addSubItem.setAccessible(true);
+
+            // 1. 过滤设置
+            Object filterItem = addSubItem.invoke(headerItem, MENU_ID_FILTER_SETTINGS, 0,
+                    "🧹 过滤设置 (" + channelName + ")");
+            View filterView = (View) filterItem;
+            filterView.setOnClickListener(v -> {
+                // 延迟调用确保 UI 线程
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    try {
+                        com.tgclean.ui.TGCleanSheet.showChannelSheet(
+                                context, dialogId, accountIdx, channelName);
+                    } catch (Throwable t) {
+                        Log.e(TAG, "Failed to open TGCleanSheet", t);
+                    }
+                });
+            });
+
+            // 2. 复制聊天 ID
+            Object copyItem = addSubItem.invoke(headerItem, MENU_ID_COPY_CHAT_ID, 0,
+                    "📋 复制聊天ID (" + dialogId + ")");
+            View copyView = (View) copyItem;
+            copyView.setOnClickListener(v -> showAndCopyDialogId(context, dialogId));
+
+            module.log(Log.INFO, TAG, "Injected menu items (dialogId=" + dialogId
+                    + ", channel=" + channelName + ")");
+
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "injectIfNeeded error: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 通过反射获取 ChatActivity.headerItem 字段
+     */
+    private static Object getHeaderItem(Object chatActivity) {
+        try {
+            if (cachedHeaderItemField != null) {
+                try {
+                    return cachedHeaderItemField.get(chatActivity);
+                } catch (IllegalAccessException ignored) {
+                    cachedHeaderItemField = null;
+                }
+            }
+
+            Field field = findFieldInHierarchy(chatActivity.getClass(), "headerItem");
+            if (field != null) {
+                field.setAccessible(true);
+                cachedHeaderItemField = field;
+                return field.get(chatActivity);
+            }
+        } catch (Throwable t) {
+            // ignore
+        }
+        return null;
     }
 
     /**
@@ -115,19 +166,11 @@ public class ChatHelperHook {
     private static String resolveChannelName(long dialogId, int accountIdx, ClassLoader cl) {
         try {
             Class<?> dialogObjClass = cl.loadClass("org.telegram.messenger.DialogObject");
-            // DialogObject.getName(int currentAccount, long dialogId)
             Method getName = dialogObjClass.getMethod("getName", int.class, long.class);
             return (String) getName.invoke(null, accountIdx, dialogId);
         } catch (Throwable t) {
             return String.valueOf(dialogId);
         }
-    }
-
-    private static int findMenuParamIndex(Class<?>[] params) {
-        for (int i = 0; i < params.length; i++) {
-            if (Menu.class.isAssignableFrom(params[i])) return i;
-        }
-        return 0;
     }
 
     private static void showAndCopyDialogId(Context context, long dialogId) {
@@ -207,6 +250,20 @@ public class ChatHelperHook {
         return 0;
     }
 
+    private static Context getActivityContext(Object activity, ClassLoader cl) {
+        try {
+            if (activity instanceof Context) return (Context) activity;
+            Method getContext = findMethod(activity.getClass(), "getContext");
+            if (getContext != null) return (Context) getContext.invoke(activity);
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    // ═════════════════════════════════════════════
+    // Reflection helpers
+    // ═════════════════════════════════════════════
+
     private static Field findFieldInHierarchy(Class<?> clazz, String name) {
         while (clazz != null && clazz != Object.class) {
             try {
@@ -225,33 +282,6 @@ public class ChatHelperHook {
             } catch (NoSuchMethodException e) {
                 clazz = clazz.getSuperclass();
             }
-        }
-        return null;
-    }
-
-    /**
-     * 在继承链中按方法名查找，并从所有重载中选出参数包含 Menu 的那个
-     */
-    private static Method findMethodInHierarchy(Class<?> clazz, String name) {
-        while (clazz != null && clazz != Object.class) {
-            for (Method m : clazz.getDeclaredMethods()) {
-                if (name.equals(m.getName())) {
-                    for (Class<?> p : m.getParameterTypes()) {
-                        if (Menu.class.isAssignableFrom(p)) return m;
-                    }
-                }
-            }
-            clazz = clazz.getSuperclass();
-        }
-        return null;
-    }
-
-    private static Context getActivityContext(Object activity) {
-        try {
-            if (activity instanceof Context) return (Context) activity;
-            Method getContext = findMethod(activity.getClass(), "getContext");
-            if (getContext != null) return (Context) getContext.invoke(activity);
-        } catch (Throwable ignored) {
         }
         return null;
     }
