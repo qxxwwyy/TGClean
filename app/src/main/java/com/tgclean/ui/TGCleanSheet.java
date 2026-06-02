@@ -241,6 +241,12 @@ public class TGCleanSheet {
                 // show()
                 Method show = bsClass.getMethod("show");
                 show.invoke(sheet);
+
+                // 设置输入法模式：允许 EditText 弹出软键盘
+                if (context instanceof android.app.Activity) {
+                    ((android.app.Activity) context).getWindow()
+                            .setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+                }
             } catch (Throwable t) {
                 // Fallback: 使用标准 AlertDialog 展示内容
                 try {
