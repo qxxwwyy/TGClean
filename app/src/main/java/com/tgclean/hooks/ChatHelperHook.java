@@ -53,13 +53,15 @@ public class ChatHelperHook {
             Method onResume = chatActivityClass.getDeclaredMethod("onResume");
             onResume.setAccessible(true);
 
-            module.hook(onResume).after(chain -> {
+            module.hook(onResume).intercept(chain -> {
+                chain.proceed();
                 try {
                     Object chatActivity = chain.getThisObject();
                     injectIfNeeded(chatActivity, cl, module);
                 } catch (Throwable t) {
                     module.log(Log.ERROR, TAG, "Error injecting menu in onResume", t);
                 }
+                return null;
             });
 
             module.log(Log.INFO, TAG, "Hooked ChatActivity.onResume for menu injection");
