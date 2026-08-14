@@ -102,14 +102,24 @@ public class RuleSetDetailActivity extends AppCompatActivity {
             writer = new FilterConfigWriter(remotePrefs);
             loadData();
         } else {
-            App.addServiceReadyListener(svc -> {
-                runOnUiThread(() -> {
-                    remotePrefs = svc.getRemotePreferences(PREFS_NAME);
-                    writer = new FilterConfigWriter(remotePrefs);
-                    loadData();
-                });
+            serviceReadyListener = svc -> runOnUiThread(() -> {
+                remotePrefs = svc.getRemotePreferences(PREFS_NAME);
+                writer = new FilterConfigWriter(remotePrefs);
+                loadData();
             });
+            App.addServiceReadyListener(serviceReadyListener);
         }
+    }
+
+    private App.ServiceReadyListener serviceReadyListener;
+
+    @Override
+    protected void onDestroy() {
+        // 防止 XposedService 迟迟未就绪时 listener 挂在 App 静态列表里泄漏 Activity
+        if (serviceReadyListener != null) {
+            App.removeServiceReadyListener(serviceReadyListener);
+        }
+        super.onDestroy();
     }
 
     private void initViews() {

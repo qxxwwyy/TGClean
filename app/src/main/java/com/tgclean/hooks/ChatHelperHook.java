@@ -72,9 +72,13 @@ public class ChatHelperHook {
                     int accountIdx = getCurrentAccount(chatActivity, tgCl);
 
                     // 首次触发：一次性扫描 TG 全部频道
+                    // ⚠️ 置位必须在扫描成功后才做：冷启动直接恢复聊天页时，
+                    // dialogsChannelsOnly 可能还没加载（loadDialogs 晚于首个 onResume），
+                    // 无条件置 true 会导致扫描永久跳过。改为成功路径内置位（返回 boolean）。
                     if (!scannedAllChannels) {
-                        scanAllChannels(context, accountIdx, tgCl, module);
-                        scannedAllChannels = true;
+                        if (scanAllChannels(context, accountIdx, tgCl, module)) {
+                            scannedAllChannels = true;
+                        }
                     }
 
                     // 增量上报当前频道
@@ -100,9 +104,13 @@ public class ChatHelperHook {
      * 一次性扫描 Telegram 全部频道列表，批量发送到 TGClean App
      *
      * 通过反射读取 MessagesController.dialogsChannelsOnly（ArrayList<TLRPC.Dialog>），
-     * 遍历每个 Dialog.id，用 DialogObject.getName() 获取频道名，逐个发广播。
+     * 遍历每个 Dialog.id，用 DialogObject.getName() 获取频道名。
+     * 全部频道打包成 JSON 放进单个广播的 extras，避免主线程逐个
+     * sendBroadcast（每个都是一次 binder IPC，几百频道会卡 UI）。
+     *
+     * @return true=扫描完成（列表非空且已广播），false=列表未加载，下次 onResume 重试
      */
-    private static void scanAllChannels(Context context, int accountIdx,
+    private static boolean scanAllChannels(Context context, int accountIdx,
                                         ClassLoader cl, XposedModule module) {
         try {
             // 获取 MessagesController 单例
@@ -114,15 +122,15 @@ public class ChatHelperHook {
             Field channelsField = findFieldInHierarchy(mcClass, "dialogsChannelsOnly");
             if (channelsField == null) {
                 module.log(Log.WARN, TAG, "dialogsChannelsOnly field not found");
-                return;
+                return false;
             }
             channelsField.setAccessible(true);
             @SuppressWarnings("unchecked")
             List<?> channels = (List<?>) channelsField.get(mc);
 
             if (channels == null || channels.isEmpty()) {
-                module.log(Log.INFO, TAG, "dialogsChannelsOnly is empty");
-                return;
+                module.log(Log.INFO, TAG, "dialogsChannelsOnly empty, will retry on next onResume");
+                return false;
             }
 
             // 加载 DialogObject
@@ -130,7 +138,7 @@ public class ChatHelperHook {
             Method getName = dialogObjClass.getMethod("getName", int.class, long.class);
 
             long now = System.currentTimeMillis();
-            int count = 0;
+            org.json.JSONArray batch = new org.json.JSONArray();
 
             for (Object dialog : channels) {
                 try {
@@ -150,24 +158,28 @@ public class ChatHelperHook {
                         name = String.valueOf(dId);
                     }
 
-                    // 发送广播
-                    Intent intent = new Intent(ACTION);
-                    intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
-                    intent.putExtra("dialog_id", dId);
-                    intent.putExtra("name", name != null ? name : String.valueOf(dId));
-                    intent.putExtra("last_seen", now);
-                    context.sendBroadcast(intent);
-
-                    count++;
+                    org.json.JSONObject ch = new org.json.JSONObject();
+                    ch.put("id", dId);
+                    ch.put("name", name != null ? name : String.valueOf(dId));
+                    ch.put("last_seen", now);
+                    batch.put(ch);
                 } catch (Throwable t) {
                     // 跳过异常的单个频道
                 }
             }
 
-            module.log(Log.INFO, TAG, "Batch scan complete: " + count + " channels sent");
+            // 单个批量广播代替 N 次单发
+            Intent intent = new Intent(ACTION);
+            intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
+            intent.putExtra("batch_json", batch.toString());
+            context.sendBroadcast(intent);
+
+            module.log(Log.INFO, TAG, "Batch scan complete: " + batch.length() + " channels sent (1 broadcast)");
+            return true;
 
         } catch (Throwable t) {
             module.log(Log.ERROR, TAG, "Failed to scan all channels: " + t.getMessage());
+            return false;
         }
     }
 
@@ -301,12 +313,15 @@ public class ChatHelperHook {
             if (getCurrentChat != null) {
                 Object chat = getCurrentChat.invoke(chatActivity);
                 if (chat != null) {
+                    // TLRPC.Chat.id 已迁移为 long（Layer 228）
                     try {
-                        Field idField = chat.getClass().getDeclaredField("id");
-                        idField.setAccessible(true);
-                        int chatId = idField.getInt(chat);
-                        if (chatId != 0) return -chatId;
-                    } catch (NoSuchFieldException ignored) {}
+                        Field idField = findFieldInHierarchy(chat.getClass(), "id");
+                        if (idField != null) {
+                            idField.setAccessible(true);
+                            long chatId = idField.getLong(chat);
+                            if (chatId != 0) return -chatId;
+                        }
+                    } catch (Throwable ignored) {}
                 }
             }
         } catch (Throwable t) { /* ignore */ }

@@ -36,7 +36,16 @@ public class KeywordFilterHook {
     private static final int MAX_FILTERED_IDS = 10000;
 
     // ─── 去重集合：避免同一消息被多个构造函数重载重复标记 ───
-    private static final Set<Integer> pendingFilterIds = ConcurrentHashMap.newKeySet();
+    private static final Set<Long> pendingFilterIds = ConcurrentHashMap.newKeySet();
+
+    /**
+     * 组合去重 key：msgId 是每频道独立自增的，跨频道必然碰撞
+     * （频道A的100和频道B的100是两条不同消息）。
+     * 用 dialogId 高32位 + msgId 低32位 组成全局唯一 key。
+     */
+    private static long comboKey(long dialogId, int msgId) {
+        return (dialogId << 32) | (msgId & 0xffffffffL);
+    }
     private static final Set<Integer> loggedIds = ConcurrentHashMap.newKeySet();
 
     // ─── 反射字段缓存 ───
@@ -49,8 +58,8 @@ public class KeywordFilterHook {
     private static volatile Field fTlReactions;     // TLRPC.Message.reactions
     private static volatile Field fMessagesField;   // ChatActivity.messages (ArrayList)
     private static volatile Field fMessagesDictField; // ChatActivity.messagesDict
-    private static volatile Field fMessagesByDaysField; // ChatActivity.messagesByDays
     private static volatile Field cachedThis0Field; // ChatActivityAdapter.this$0
+    private static volatile Method cachedDictRemoveMethod; // SparseArray.remove(int) — 反射缓存
     private static volatile boolean fieldsResolved = false;
 
     private static void resolveFields(ClassLoader cl) {
@@ -92,11 +101,6 @@ public class KeywordFilterHook {
                 try {
                     fMessagesDictField = caClass.getDeclaredField("messagesDict");
                     fMessagesDictField.setAccessible(true);
-                } catch (NoSuchFieldException ignored) {}
-
-                try {
-                    fMessagesByDaysField = caClass.getDeclaredField("messagesByDays");
-                    fMessagesByDaysField.setAccessible(true);
                 } catch (NoSuchFieldException ignored) {}
 
                 // ChatActivityAdapter.this$0
@@ -185,22 +189,13 @@ public class KeywordFilterHook {
                             Object owner = fMessageOwner.get(thisObj);
                             if (owner == null) return result;
 
-                            // 获取msgId用于去重
+                            // 获取msgId
                             int msgId = 0;
                             if (fTlMessageId != null) {
                                 msgId = fTlMessageId.getInt(owner);
                             }
 
-                            // 如果这个msgId已经在pending集合中，说明其他构造函数已标记，跳过
-                            if (msgId != 0 && pendingFilterIds.contains(msgId)) return result;
-
-                            String text = null;
-                            if (fTlMessage != null) {
-                                Object val = fTlMessage.get(owner);
-                                if (val instanceof String) text = (String) val;
-                            }
-                            if (text == null || text.isEmpty()) return result;
-
+                            // dialogId 提前计算（去重key需要；msgId跨频道碰撞，必须组合）
                             long dialogId = 0;
                             if (fTlDialogId != null) {
                                 dialogId = fTlDialogId.getLong(owner);
@@ -208,6 +203,16 @@ public class KeywordFilterHook {
                             if (dialogId == 0) {
                                 dialogId = computeDialogId(owner);
                             }
+
+                            // 如果这个 (dialogId, msgId) 已在pending集合中，说明其他构造函数已标记，跳过
+                            if (msgId != 0 && pendingFilterIds.contains(comboKey(dialogId, msgId))) return result;
+
+                            String text = null;
+                            if (fTlMessage != null) {
+                                Object val = fTlMessage.get(owner);
+                                if (val instanceof String) text = (String) val;
+                            }
+                            if (text == null || text.isEmpty()) return result;
 
                             Object reactions = null;
                             if (fTlReactions != null) {
@@ -218,7 +223,7 @@ public class KeywordFilterHook {
                                 fDeletedField.setBoolean(thisObj, true);
                                 // 加入pending集合，防止其他构造函数重复处理
                                 if (msgId != 0) {
-                                    pendingFilterIds.add(msgId);
+                                    pendingFilterIds.add(comboKey(dialogId, msgId));
                                     // 防止内存泄漏
                                     if (pendingFilterIds.size() > MAX_FILTERED_IDS) {
                                         pendingFilterIds.clear();
@@ -303,20 +308,28 @@ public class KeywordFilterHook {
                                                 Object msgOwner = fMessageOwner.get(msgObj);
                                                 if (msgOwner != null && fTlMessageId != null) {
                                                     int msgId = fTlMessageId.getInt(msgOwner);
-                                                    Object dicts = fMessagesDictField.get(chatActivity);
-                                                    if (dicts instanceof Object[]) {
-                                                        for (Object dict : (Object[]) dicts) {
-                                                            if (dict != null) {
+                                                    Object dict = fMessagesDictField.get(chatActivity);
+                                                    if (dict instanceof Object[]) {
+                                                        for (Object d : (Object[]) dict) {
+                                                            if (d != null) {
                                                                 try {
-                                                                    Method removeMethod = dict.getClass()
-                                                                            .getMethod("remove", Object.class);
-                                                                    removeMethod.invoke(dict, msgId);
+                                                                    // ⚠️ SparseArray 只有 remove(int)/delete(int)，
+                                                                    // 用 Object.class 必抛 NoSuchMethodException
+                                                                    Method rm = cachedDictRemoveMethod != null
+                                                                            ? cachedDictRemoveMethod
+                                                                            : (cachedDictRemoveMethod = d.getClass().getMethod("remove", int.class));
+                                                                    rm.invoke(d, msgId);
                                                                 } catch (Throwable ignored) {}
                                                             }
                                                         }
                                                     }
-                                                    // 从pending集合中移除已清理的msgId
-                                                    pendingFilterIds.remove(msgId);
+                                                    // 从pending集合中移除（组合key，与阶段1一致）
+                                                    long dId = 0;
+                                                    if (fTlDialogId != null) {
+                                                        dId = fTlDialogId.getLong(msgOwner);
+                                                    }
+                                                    if (dId == 0) dId = computeDialogId(msgOwner);
+                                                    pendingFilterIds.remove(comboKey(dId, msgId));
                                                 }
                                             } catch (Throwable ignored) {}
                                         }
@@ -348,30 +361,43 @@ public class KeywordFilterHook {
     // 工具方法
     // ═══════════════════════════════════════════════════
 
+    /**
+     * 从 peer_id 计算 dialogId（dialog_id 为 0 时的兜底路径）。
+     *
+     * ⚠️ Telegram 已完成 64 位 ID 迁移：TLRPC.Peer 的 user_id/chat_id/channel_id
+     * 均为 long（Layer 228 验证）。反射必须用 getLong()，getInt() 会抛
+     * IllegalArgumentException。字段查找需覆盖父类（Peer 是抽象基类，
+     * TL_peerUser/TL_peerChat/TL_peerChannel 只是空子类）。
+     */
     private static long computeDialogId(Object tlMessage) {
         try {
             Object peerId = fTlPeerId != null ? fTlPeerId.get(tlMessage) : null;
             if (peerId == null) return 0;
 
-            try {
-                Field f = peerId.getClass().getDeclaredField("channel_id");
-                f.setAccessible(true);
-                int id = f.getInt(peerId);
-                if (id != 0) return -id;
-            } catch (NoSuchFieldException ignored) {}
+            long chatId = getLongField(peerId, "chat_id");
+            if (chatId != 0) return -chatId;
 
-            try {
-                Field f = peerId.getClass().getDeclaredField("chat_id");
-                f.setAccessible(true);
-                int id = f.getInt(peerId);
-                if (id != 0) return -id;
-            } catch (NoSuchFieldException ignored) {}
+            long channelId = getLongField(peerId, "channel_id");
+            if (channelId != 0) return -channelId;
 
-            try {
-                Field f = peerId.getClass().getDeclaredField("user_id");
-                f.setAccessible(true);
-                return f.getInt(peerId);
-            } catch (NoSuchFieldException ignored) {}
+            return getLongField(peerId, "user_id");
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    /** 在继承链中查找 long 字段并读取（Peer 子类不声明字段，字段全在抽象基类上） */
+    private static long getLongField(Object obj, String name) {
+        try {
+            Class<?> c = obj.getClass();
+            while (c != null && c != Object.class) {
+                try {
+                    Field f = c.getDeclaredField(name);
+                    f.setAccessible(true);
+                    return f.getLong(obj);
+                } catch (NoSuchFieldException e) {
+                    c = c.getSuperclass();
+                }
+            }
         } catch (Throwable ignored) {}
         return 0;
     }

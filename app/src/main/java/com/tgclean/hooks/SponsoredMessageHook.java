@@ -23,7 +23,8 @@ public class SponsoredMessageHook {
     public static void hook(ClassLoader cl, XposedModule module) {
         hookAddSponsoredMessages(cl, module);
         hookGetSponsoredMessages(cl, module);
-        hookGetSponsoredMessagesCount(cl, module);
+        // 注：getSponsoredMessagesCount 在 layer 228 已不在 MessagesController 中
+        // （变为 ChatActivity 内部逻辑），此 hook 已删除。
         hookTLDeserialize(cl, module);
     }
 
@@ -55,23 +56,14 @@ public class SponsoredMessageHook {
             if (getMethod == null) return;
             module.hook(getMethod).intercept(chain -> {
                 module.log(Log.DEBUG, TAG, "Blocked getSponsoredMessages");
-                return new ArrayList<>();
+                // 返回 null：TG 调用方检查 res == null 后直接 return，不展示赞助消息。
+                // 注意：新版返回类型是 MessagesController.SponsoredMessagesInfo，
+                // 不能返回 ArrayList，否则 ClassCastException。
+                return null;
             });
             module.log(Log.INFO, TAG, "Hooked getSponsoredMessages");
         } catch (Throwable t) {
             module.log(Log.ERROR, TAG, "Failed to hook getSponsoredMessages", t);
-        }
-    }
-
-    private static void hookGetSponsoredMessagesCount(ClassLoader cl, XposedModule module) {
-        try {
-            Class<?> mcClass = cl.loadClass("org.telegram.messenger.MessagesController");
-            Method getCountMethod = findMethod(mcClass, "getSponsoredMessagesCount");
-            if (getCountMethod == null) return;
-            module.hook(getCountMethod).intercept(chain -> 0);
-            module.log(Log.INFO, TAG, "Hooked getSponsoredMessagesCount");
-        } catch (Throwable t) {
-            module.log(Log.ERROR, TAG, "Failed to hook getSponsoredMessagesCount", t);
         }
     }
 

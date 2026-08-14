@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.util.Log;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
@@ -14,6 +15,11 @@ import org.json.JSONObject;
  *
  * Hook 端（Telegram 进程）在 ChatActivity.onResume 时发送 component-explicit broadcast，
  * 本 receiver 接收后将频道信息存入本地 SharedPreferences。
+ *
+ * 支持两种格式：
+ * 1. 单频道：dialog_id / name / last_seen extras（增量上报）
+ * 2. 批量：batch_json extras（首次全量扫描，单个广播携带全部频道，
+ *    避免几百次 binder IPC）
  *
  * 使用 component-explicit broadcast 可以绕过 Android 11+ package visibility 限制，
  * 因为 AMS 内部使用 MATCH_ALL 查询，不受应用层可见性约束。
@@ -29,6 +35,7 @@ public class ChannelReceiver extends BroadcastReceiver {
     public static final String EXTRA_DIALOG_ID = "dialog_id";
     public static final String EXTRA_NAME = "name";
     public static final String EXTRA_LAST_SEEN = "last_seen";
+    public static final String EXTRA_BATCH_JSON = "batch_json";
 
     // SharedPreferences
     private static final String PREFS_NAME = "discovered_channels";
@@ -38,6 +45,49 @@ public class ChannelReceiver extends BroadcastReceiver {
     public void onReceive(Context context, Intent intent) {
         if (!ACTION_CHANNEL_DISCOVERED.equals(intent.getAction())) return;
 
+        String batchJson = intent.getStringExtra(EXTRA_BATCH_JSON);
+        if (batchJson != null) {
+            handleBatch(context, batchJson);
+            return;
+        }
+
+        handleSingle(context, intent);
+    }
+
+    /** 批量模式：单个广播携带全部频道 */
+    private void handleBatch(Context context, String batchJson) {
+        try {
+            JSONArray batch = new JSONArray(batchJson);
+            if (batch.length() == 0) return;
+
+            SharedPreferences sp = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+            JSONObject channels = readChannels(sp);
+
+            int merged = 0;
+            for (int i = 0; i < batch.length(); i++) {
+                JSONObject item = batch.getJSONObject(i);
+                long dialogId = item.optLong("id", 0);
+                if (dialogId == 0) continue;
+
+                JSONObject ch = new JSONObject();
+                ch.put("name", item.optString("name", String.valueOf(dialogId)));
+                ch.put("last_seen", item.optLong("last_seen", 0));
+                channels.put(String.valueOf(dialogId), ch);
+                merged++;
+            }
+
+            sp.edit().putString(KEY_CHANNELS, channels.toString()).apply();
+            Log.i(TAG, "Batch received: " + merged + " channels, total: " + channels.length());
+
+        } catch (JSONException e) {
+            Log.e(TAG, "Failed to parse batch channel data", e);
+        } catch (Throwable t) {
+            Log.e(TAG, "Error in handleBatch", t);
+        }
+    }
+
+    /** 单频道模式：增量上报 */
+    private void handleSingle(Context context, Intent intent) {
         try {
             long dialogId = intent.getLongExtra(EXTRA_DIALOG_ID, 0);
             String name = intent.getStringExtra(EXTRA_NAME);
@@ -50,10 +100,8 @@ public class ChannelReceiver extends BroadcastReceiver {
 
             Log.i(TAG, "Received channel: " + dialogId + " (" + name + ")");
 
-            // UPSERT into SharedPreferences JSON
             SharedPreferences sp = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-            String json = sp.getString(KEY_CHANNELS, "{}");
-            JSONObject channels = new JSONObject(json);
+            JSONObject channels = readChannels(sp);
 
             JSONObject ch = new JSONObject();
             ch.put("name", name != null ? name : String.valueOf(dialogId));
@@ -69,6 +117,11 @@ public class ChannelReceiver extends BroadcastReceiver {
         } catch (Throwable t) {
             Log.e(TAG, "Error in onReceive", t);
         }
+    }
+
+    private static JSONObject readChannels(SharedPreferences sp) throws JSONException {
+        String json = sp.getString(KEY_CHANNELS, "{}");
+        return new JSONObject(json);
     }
 
     /**
