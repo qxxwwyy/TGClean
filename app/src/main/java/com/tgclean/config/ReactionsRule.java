@@ -40,4 +40,28 @@ public class ReactionsRule {
         sb.append(whitelistMode ? "·只显" : "·隐藏");
         return sb.toString();
     }
+
+    /** 调试日志用：带 Unicode 码点的完整描述，暴露变体选择符等不可见差异 */
+    public String describeWithCodepoints() {
+        StringBuilder sb = new StringBuilder("mode=");
+        sb.append(whitelistMode ? "whitelist" : "blacklist");
+        sb.append(" emoji=").append(codepoints(emoji)).append(" min=").append(minCount);
+        if (hasEmoji2()) {
+            sb.append(" emoji2=").append(codepoints(emoji2)).append(" max=").append(maxCount);
+        }
+        return sb.toString();
+    }
+
+    private static String codepoints(String s) {
+        if (s == null) return "null";
+        if (s.isEmpty()) return "EMPTY";
+        StringBuilder cp = new StringBuilder();
+        for (int i = 0; i < s.length(); ) {
+            int c = s.codePointAt(i);
+            if (cp.length() > 0) cp.append(' ');
+            cp.append(String.format("U+%X", c));
+            i += Character.charCount(c);
+        }
+        return cp + "「" + s + "」";
+    }
 }

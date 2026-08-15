@@ -161,6 +161,12 @@ public class KeywordEngine {
         return false;
     }
 
+    /** 当前频道是否有启用中的表情规则（调试与评估共用） */
+    public ReactionsRule getActiveRule(long dialogId) {
+        ReactionsRule rule = snapshot.reactionsRules.get(dialogId);
+        return rule != null && rule.enabled ? rule : null;
+    }
+
     private boolean matchKeywords(String text, long dialogId, RulesSnapshot rules) {
         // 规则集匹配
         for (FilterConfig.RuleSet rs : rules.ruleSets) {
@@ -276,6 +282,7 @@ public class KeywordEngine {
     /** 统计指定标准 emoji 的 reaction 数量（reactions 为 null 时返回 0） */
     private static int countReaction(Object reactions, String emoji) {
         if (reactions == null || emoji == null || emoji.isEmpty()) return 0;
+        String normTarget = stripFe0f(emoji);
         try {
             Field resultsField = cachedField(reactions.getClass(), "results");
             if (resultsField == null) return 0;
@@ -290,13 +297,21 @@ public class KeywordEngine {
                 if (reactionField == null) continue;
                 Object reaction = reactionField.get(reactionCount);
 
-                // 仅 TL_reactionEmoji 有 emoticon 字符串；自定义表情(document_id)/付费星星无法按字符匹配
-                if (reaction == null || !reaction.getClass().getSimpleName().equals("TL_reactionEmoji")) {
+                // 不按类名过滤：只要 reaction 对象沿继承链能找到 emoticon 字符串字段
+                // 即视为标准 emoji reaction（TL_reactionCustomEmoji 只有 document_id，
+                // 层级查找不到 emoticon，自然跳过）
+                if (reaction == null) continue;
+                Field emoticonField = findFieldInHierarchy(reaction.getClass(), "emoticon");
+                if (emoticonField == null) continue;
+                Object emoticonObj = emoticonField.get(reaction);
+                if (!(emoticonObj instanceof String)) continue;
+                String emoticon = (String) emoticonObj;
+
+                // 归一化比较：忽略 U+FE0F 变体选择符（TG 默认爱心是 "❤"，
+                // 快速选择按钮写入的是 "❤️"，其余多数 emoji 无此差异）
+                if (!emoticon.equals(emoji) && !stripFe0f(emoticon).equals(normTarget)) {
                     continue;
                 }
-                Field emoticonField = cachedField(reaction.getClass(), "emoticon");
-                if (emoticonField == null) continue;
-                if (!emoji.equals(emoticonField.get(reaction))) continue;
 
                 Field countField = cachedField(rcClass, "count");
                 if (countField == null) continue;
@@ -305,5 +320,95 @@ public class KeywordEngine {
         } catch (Throwable ignored) {
         }
         return 0;
+    }
+
+    /** 去掉 U+FE0F（VARIATION SELECTOR-16），用于表情字符串归一化比较 */
+    static String stripFe0f(String s) {
+        return s == null ? "" : s.replace("\uFE0F", "");
+    }
+
+    // ═════════════════════════════════════════════
+    // 调试：reactions 结构转储（RX-DEBUG 日志用）
+    // ═════════════════════════════════════════════
+
+    /**
+     * 把 TLRPC.Message.reactions 转成可读字符串，用于定位匹配失败原因。
+     * 例：TL_messageReactions min=true results=[TL_reactionEmoji(U+2764「❤」):120, TL_reactionCustomEmoji(no-emoticon):45]
+     */
+    public static String debugReactions(Object reactions) {
+        if (reactions == null) return "reactions=null";
+        StringBuilder sb = new StringBuilder(reactions.getClass().getSimpleName());
+        try {
+            Field minField = cachedField(reactions.getClass(), "min");
+            if (minField != null) {
+                sb.append(" min=").append(minField.getBoolean(reactions));
+            }
+        } catch (Throwable ignored) {}
+        try {
+            Field resultsField = cachedField(reactions.getClass(), "results");
+            Object results = resultsField != null ? resultsField.get(reactions) : null;
+            if (!(results instanceof List)) {
+                sb.append(" results=NOT_LIST(")
+                        .append(results == null ? "null" : results.getClass().getName()).append(')');
+                return sb.toString();
+            }
+            List<?> list = (List<?>) results;
+            sb.append(" count=").append(list.size()).append(" results=[");
+            for (int i = 0; i < list.size() && i < 6; i++) {
+                Object rc = list.get(i);
+                if (i > 0) sb.append(", ");
+                sb.append(debugReactionCount(rc));
+            }
+            if (list.size() > 6) sb.append(" …+").append(list.size() - 6);
+            sb.append(']');
+        } catch (Throwable t) {
+            sb.append(" dump-error:").append(t);
+        }
+        return sb.toString();
+    }
+
+    private static String debugReactionCount(Object rc) {
+        if (rc == null) return "null";
+        StringBuilder sb = new StringBuilder();
+        try {
+            Object reaction = null;
+            int count = -1;
+            Field rf = cachedField(rc.getClass(), "reaction");
+            if (rf != null) reaction = rf.get(rc);
+            Field cf = cachedField(rc.getClass(), "count");
+            if (cf != null) count = cf.getInt(rc);
+
+            if (reaction == null) {
+                sb.append("reaction=null");
+            } else {
+                String cls = reaction.getClass().getSimpleName();
+                Field ef = findFieldInHierarchy(reaction.getClass(), "emoticon");
+                if (ef != null) {
+                    Object v = ef.get(reaction);
+                    sb.append(cls).append('(').append(codepoints(v)).append(')');
+                } else {
+                    // 无 emoticon 字段 = 自定义表情/付费星星 reaction
+                    sb.append(cls).append("(no-emoticon)");
+                }
+            }
+            sb.append(':').append(count);
+        } catch (Throwable t) {
+            sb.append("err:").append(t);
+        }
+        return sb.toString();
+    }
+
+    /** 字符串转 Unicode 码点表示，暴露不可见的变体选择符/ZWJ 差异 */
+    static String codepoints(Object v) {
+        if (!(v instanceof String)) return String.valueOf(v);
+        String s = (String) v;
+        StringBuilder cp = new StringBuilder();
+        for (int i = 0; i < s.length(); ) {
+            int c = s.codePointAt(i);
+            if (cp.length() > 0) cp.append(' ');
+            cp.append(String.format("U+%X", c));
+            i += Character.charCount(c);
+        }
+        return cp + "「" + s + "」";
     }
 }
