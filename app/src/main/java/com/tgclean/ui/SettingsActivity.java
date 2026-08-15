@@ -600,7 +600,7 @@ public class SettingsActivity extends AppCompatActivity {
         }
 
         class FooterHolder extends RecyclerView.ViewHolder {
-            final View btnShowAll;
+            final android.widget.Button btnShowAll;
 
             FooterHolder(View itemView) {
                 super(itemView);
