@@ -500,15 +500,12 @@ public class ChatHelperHook {
     }
 
     /**
-     * 保存请求经显式广播发给 TGClean App（hook 端 remote prefs 只读），
-     * App 端写入后由框架实时推送回来，KeywordEngine 热更新规则快照。
-     *
-     * ⚠️ FLAG_INCLUDE_STOPPED_PACKAGES：更新安装 APK 后 App 处于 stopped 态，
-     * 默认不接收任何广播 → 保存静默丢失（v22 实测：规则卡死在旧值）。
-     * 加此 flag 后系统会拉起 App 进程投递，RemoteConfigStore 排队等 binder。
-     *
-     * 同时注册一次性回执接收器：App 写入成功后回发 ACTION_REACTIONS_RULE_SAVED，
-     * 5 秒未收到则提示用户打开一次 App（写入链路异常时的可见反馈）。
+     * 保存请求三级通道（hook 端 remote prefs 只读，必须由 App 进程写入）：
+     * 1. 显式广播（+FLAG_INCLUDE_STOPPED_PACKAGES）— App 在运行时瞬时完成
+     * 2. 2.5s 无回执 → 透明拉起 App 的 WriteConfigActivity 兜底写入
+     *    （MIUI 自启动管理拦截广播拉起进程，但前台应用 startActivity 不受限）
+     * 3. 再 6s 无回执 → 提示用户手动打开 App
+     * App 写入成功后回发 ACTION_REACTIONS_RULE_SAVED 回执。
      */
     private static volatile android.content.BroadcastReceiver pendingConfirmReceiver;
     private static volatile Runnable pendingConfirmTimeout;
@@ -519,7 +516,6 @@ public class ChatHelperHook {
                                                    String emoji2, int maxCount) {
         Intent intent = new Intent(ACTION_REACTIONS_RULE);
         intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
-        // 关键：允许投递给 stopped 状态的 App（安装/更新后未打开过）
         intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
         intent.putExtra("dialog_id", dialogId);
         intent.putExtra("enabled", enabled);
@@ -528,23 +524,43 @@ public class ChatHelperHook {
         intent.putExtra("min_count", minCount);
         intent.putExtra("emoji2", emoji2 == null ? "" : emoji2);
         intent.putExtra("max_count", maxCount);
-        registerSaveConfirmation(context);
+
+        Context appContext = context.getApplicationContext();
+        registerSaveConfirmation(appContext, 2500, () -> {
+            // 广播通道未达（App 进程被 ROM 拦截拉起）→ 透明 Activity 兜底
+            try {
+                Intent fallback = new Intent();
+                fallback.setComponent(new ComponentName(TG_CLEAN_PACKAGE,
+                        "com.tgclean.ui.WriteConfigActivity"));
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                fallback.putExtras(intent);
+                appContext.startActivity(fallback);
+                registerSaveConfirmation(appContext, 6000, () ->
+                        Toast.makeText(appContext,
+                                "保存未确认：请打开一次 TGClean 应用后重试",
+                                Toast.LENGTH_LONG).show());
+            } catch (Throwable t) {
+                Toast.makeText(appContext,
+                        "保存失败：" + t.getMessage(), Toast.LENGTH_LONG).show();
+            }
+        });
         context.sendBroadcast(intent);
     }
 
-    /** 注册保存回执（单飞：新保存覆盖旧回执等待） */
-    private static void registerSaveConfirmation(Context context) {
+    /**
+     * 注册保存回执（单飞：新保存覆盖旧回执等待）。
+     * 收到回执 → 提示已生效；超时 → 执行 onTimeout（兜底链的下一级）。
+     */
+    private static void registerSaveConfirmation(Context appContext, long timeoutMs,
+                                                 Runnable onTimeout) {
         // 清理上一轮
+        android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
         if (pendingConfirmTimeout != null) {
-            new android.os.Handler(android.os.Looper.getMainLooper())
-                    .removeCallbacks(pendingConfirmTimeout);
+            main.removeCallbacks(pendingConfirmTimeout);
         }
         if (pendingConfirmReceiver != null) {
-            try { context.unregisterReceiver(pendingConfirmReceiver); } catch (Throwable ignored) {}
+            try { appContext.unregisterReceiver(pendingConfirmReceiver); } catch (Throwable ignored) {}
         }
-
-        android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
-        final Context appContext = context.getApplicationContext();
 
         android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
             @Override
@@ -558,9 +574,7 @@ public class ChatHelperHook {
         Runnable timeout = () -> {
             try { appContext.unregisterReceiver(receiver); } catch (Throwable ignored) {}
             pendingConfirmReceiver = null;
-            Toast.makeText(appContext,
-                    "保存未确认：请打开一次 TGClean 应用后重试",
-                    Toast.LENGTH_LONG).show();
+            onTimeout.run();
         };
         pendingConfirmReceiver = receiver;
         pendingConfirmTimeout = timeout;
@@ -572,7 +586,7 @@ public class ChatHelperHook {
         } else {
             appContext.registerReceiver(receiver, filter);
         }
-        main.postDelayed(timeout, 5000);
+        main.postDelayed(timeout, timeoutMs);
     }
 
     private static TextView sectionLabel(Context context, String text) {

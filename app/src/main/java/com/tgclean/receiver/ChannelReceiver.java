@@ -91,6 +91,16 @@ public class ChannelReceiver extends BroadcastReceiver {
         if (rule.emoji == null) rule.emoji = "";
         if (rule.emoji2 == null) rule.emoji2 = "";
 
+        submitRuleWrite(context, dialogId, rule);
+        Log.i(TAG, "Reactions rule queued: dialog=" + dialogId
+                + " enabled=" + rule.enabled + " (" + rule.describe() + ")");
+    }
+
+    /**
+     * 规则写入的公共入口（广播通道与 WriteConfigActivity 兜底通道共用）：
+     * 写入落地后向 TG 进程回发确认广播。
+     */
+    public static void submitRuleWrite(Context context, long dialogId, ReactionsRule rule) {
         RemoteConfigStore.submit(svc -> {
             FilterConfigWriter writer = new FilterConfigWriter(
                     svc.getRemotePreferences(FilterConfigWriter.PREFS_NAME));
@@ -101,8 +111,6 @@ public class ChannelReceiver extends BroadcastReceiver {
             reply.putExtra("dialog_id", dialogId);
             context.sendBroadcast(reply);
         });
-        Log.i(TAG, "Reactions rule queued: dialog=" + dialogId
-                + " enabled=" + rule.enabled + " (" + rule.describe() + ")");
     }
 
     /** 批量模式：单个广播携带全部频道 */

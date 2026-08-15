@@ -4,7 +4,7 @@
 - **仓库**: https://github.com/qxxwwyy/TGClean
 - **正式版本**: v1.0.0
 - **开发分支**: `feature/in-app-ui`（PR #1）
-- **当前测试版本**: v23（stopped 态广播投递修复+保存回执，versionCode 10 / 1.3.2）
+- **当前测试版本**: v24（MIUI 广播拦截 → Activity 兜底写入，versionCode 11 / 1.3.3）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
