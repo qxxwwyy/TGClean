@@ -228,14 +228,17 @@ public class KeywordFilterHook {
 
     /** 剩余行数低于此值视为"无法滚动"（一屏约 8-12 条消息） */
     private static final int CASCADE_MIN_ROWS = 5;
-    /** 级联安全上限（30 批 × 50 条 ≈ 1500 条），防止在大型频道失控 */
-    private static final int CASCADE_MAX_BATCHES = 30;
+    /** 级联安全上限（100 批 × 50 条 = 5000 条），防止在大型频道失控 */
+    private static final int CASCADE_MAX_BATCHES = 100;
     private static final int CASCADE_BATCH_SIZE = 50;
     /** classGuid → 已级联批次数（classGuid 每 ChatActivity 实例唯一） */
     private static final ConcurrentHashMap<Integer, Integer> cascadeCount =
             new ConcurrentHashMap<>();
     /** classGuid → 是否有级联请求在途（防止与 TG 自身重试循环交叠时重复发起） */
     private static final ConcurrentHashMap<Integer, Boolean> cascadeInFlight =
+            new ConcurrentHashMap<>();
+    /** classGuid → 上次级联锚点（无推进的重复批次不消耗上限额度） */
+    private static final ConcurrentHashMap<Integer, Integer> lastCascadeAnchor =
             new ConcurrentHashMap<>();
 
     private static void maybeCascade(Object chatActivity, XposedModule module,
@@ -258,6 +261,7 @@ public class KeywordFilterHook {
             }
             if (realRows >= CASCADE_MIN_ROWS) {
                 cascadeCount.remove(guidObj); // 内容健康，重置计数
+                lastCascadeAnchor.remove(guidObj);
                 return;
             }
             if (isEnd) return; // 历史已到底，确实没有达标消息
@@ -266,12 +270,21 @@ public class KeywordFilterHook {
             if (oldestId <= 0) return;
 
             int guid = guidObj;
+            // 锚点无推进 = 重复范围（历史版本多实例交叉的产物）。
+            // 这种批次不消耗上限额度，也不重复发起请求。
+            Integer prevAnchor = lastCascadeAnchor.put(guid, oldestId);
+            if (prevAnchor != null && oldestId >= prevAnchor) {
+                module.log(Log.WARN, TAG, "Cascade anchor not advancing ("
+                        + prevAnchor + " -> " + oldestId + "), skip duplicate range");
+                return;
+            }
             int n = cascadeCount.merge(guid, 1, Integer::sum);
             if (cascadeCount.size() > 100) cascadeCount.clear(); // 防泄漏
             if (n > CASCADE_MAX_BATCHES) {
                 if (n == CASCADE_MAX_BATCHES + 1) {
                     module.log(Log.WARN, TAG, "Cascade cap reached (" + CASCADE_MAX_BATCHES
-                            + " batches) for dialog=" + notifArgs[0] + ", giving up");
+                            + " batches ≈ " + (CASCADE_MAX_BATCHES * CASCADE_BATCH_SIZE)
+                            + " msgs) for dialog=" + notifArgs[0] + ", giving up");
                 }
                 return;
             }
