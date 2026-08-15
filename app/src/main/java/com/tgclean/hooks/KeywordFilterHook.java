@@ -208,6 +208,9 @@ public class KeywordFilterHook {
     /** classGuid → 已级联批次数（classGuid 每 ChatActivity 实例唯一） */
     private static final ConcurrentHashMap<Integer, Integer> cascadeCount =
             new ConcurrentHashMap<>();
+    /** classGuid → 是否有级联请求在途（防止与 TG 自身重试循环交叠时重复发起） */
+    private static final ConcurrentHashMap<Integer, Boolean> cascadeInFlight =
+            new ConcurrentHashMap<>();
 
     private static void maybeCascade(Object chatActivity, XposedModule module,
                                      Object[] notifArgs, List<?> originalArr,
@@ -216,6 +219,9 @@ public class KeywordFilterHook {
             if (chatActivity == null) return;
             Integer guidObj = (Integer) notifArgs[10];
             boolean isEnd = Boolean.TRUE.equals(notifArgs[9]);
+
+            // 任何新批次到达都意味着上一个在途请求已落地（或与本规则无关），清标记
+            cascadeInFlight.remove(guidObj);
 
             if (kept.size() >= CASCADE_MIN_ROWS) {
                 cascadeCount.remove(guidObj); // 内容健康，重置计数
@@ -236,6 +242,8 @@ public class KeywordFilterHook {
                 }
                 return;
             }
+            // 已有在途级联（尚未收到响应批次）时不重复发起
+            if (cascadeInFlight.putIfAbsent(guid, Boolean.TRUE) != null) return;
 
             long dialogId = (Long) notifArgs[0];
             int mode = (Integer) notifArgs[14];
@@ -274,6 +282,9 @@ public class KeywordFilterHook {
 
             Field waitingField = findFieldInHierarchy(caClass, "waitingForLoad");
             if (waitingField != null) {
+                // ⚠️ 必须先 setAccessible（private 字段，漏掉会 IllegalAccessException
+                // 导致整个级联加载静默中止 — v21 实测教训）
+                waitingField.setAccessible(true);
                 Object waitingList = waitingField.get(chatActivity);
                 if (waitingList instanceof List) {
                     @SuppressWarnings("unchecked")
