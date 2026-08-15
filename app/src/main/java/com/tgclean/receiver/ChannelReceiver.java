@@ -6,20 +6,26 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.util.Log;
 
+import com.tgclean.RemoteConfigStore;
+import com.tgclean.config.FilterConfigWriter;
+import com.tgclean.config.ReactionsRule;
+
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 /**
- * 接收 Hook 端发来的频道发现广播
+ * 接收 Hook 端（Telegram 进程）发来的广播，是 TG → App 的单向桥：
  *
- * Hook 端（Telegram 进程）在 ChatActivity.onResume 时发送 component-explicit broadcast，
- * 本 receiver 接收后将频道信息存入本地 SharedPreferences。
+ * 1. com.tgclean.ACTION_CHANNEL_DISCOVERED — 频道发现
+ *    a) 单频道：dialog_id / name / last_seen extras（增量上报）
+ *    b) 批量：batch_json extras（首次全量扫描，单个广播携带全部频道）
+ *    存入本地 SharedPreferences（discovered_channels）。
  *
- * 支持两种格式：
- * 1. 单频道：dialog_id / name / last_seen extras（增量上报）
- * 2. 批量：batch_json extras（首次全量扫描，单个广播携带全部频道，
- *    避免几百次 binder IPC）
+ * 2. com.tgclean.ACTION_REACTIONS_RULE — 每频道表情过滤规则保存请求
+ *    （hook 端 remote prefs 只读，写入必须经 App 进程）
+ *    extras: dialog_id / enabled / whitelist / emoji / min_count / emoji2 / max_count
+ *    经 RemoteConfigStore 写入 remote prefs；服务未就绪时排队等待。
  *
  * 使用 component-explicit broadcast 可以绕过 Android 11+ package visibility 限制，
  * 因为 AMS 内部使用 MATCH_ALL 查询，不受应用层可见性约束。
@@ -30,6 +36,9 @@ public class ChannelReceiver extends BroadcastReceiver {
 
     public static final String ACTION_CHANNEL_DISCOVERED =
             "com.tgclean.ACTION_CHANNEL_DISCOVERED";
+
+    public static final String ACTION_REACTIONS_RULE =
+            "com.tgclean.ACTION_REACTIONS_RULE";
 
     // Intent extras
     public static final String EXTRA_DIALOG_ID = "dialog_id";
@@ -43,7 +52,12 @@ public class ChannelReceiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (!ACTION_CHANNEL_DISCOVERED.equals(intent.getAction())) return;
+        String action = intent.getAction();
+        if (ACTION_REACTIONS_RULE.equals(action)) {
+            handleReactionsRule(intent);
+            return;
+        }
+        if (!ACTION_CHANNEL_DISCOVERED.equals(action)) return;
 
         String batchJson = intent.getStringExtra(EXTRA_BATCH_JSON);
         if (batchJson != null) {
@@ -52,6 +66,33 @@ public class ChannelReceiver extends BroadcastReceiver {
         }
 
         handleSingle(context, intent);
+    }
+
+    /**
+     * 表情过滤规则保存：写入 remote prefs（经 RemoteConfigStore，
+     * XposedService 未就绪时排队）。写入后框架会实时推送到 TG 进程。
+     */
+    private void handleReactionsRule(Intent intent) {
+        long dialogId = intent.getLongExtra(EXTRA_DIALOG_ID, 0);
+        if (dialogId == 0) return;
+
+        ReactionsRule rule = new ReactionsRule();
+        rule.enabled = intent.getBooleanExtra("enabled", false);
+        rule.whitelistMode = intent.getBooleanExtra("whitelist", true);
+        rule.emoji = intent.getStringExtra("emoji");
+        rule.minCount = intent.getIntExtra("min_count", 0);
+        rule.emoji2 = intent.getStringExtra("emoji2");
+        rule.maxCount = intent.getIntExtra("max_count", 0);
+        if (rule.emoji == null) rule.emoji = "";
+        if (rule.emoji2 == null) rule.emoji2 = "";
+
+        RemoteConfigStore.submit(svc -> {
+            FilterConfigWriter writer = new FilterConfigWriter(
+                    svc.getRemotePreferences(FilterConfigWriter.PREFS_NAME));
+            writer.setReactionsRule(dialogId, rule);
+        });
+        Log.i(TAG, "Reactions rule queued: dialog=" + dialogId
+                + " enabled=" + rule.enabled + " (" + rule.describe() + ")");
     }
 
     /** 批量模式：单个广播携带全部频道 */

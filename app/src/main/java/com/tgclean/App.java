@@ -61,6 +61,8 @@ public class App extends Application implements XposedServiceHelper.OnServiceLis
     public void onServiceBind(XposedService svc) {
         service = svc;
         Log.i(TAG, "XposedService bound");
+        // 先清空积压的配置写操作（可能来自 TG 进程广播拉起本进程的场景）
+        RemoteConfigStore.flush(svc);
         for (var listener : listeners) {
             try {
                 listener.onServiceReady(svc);

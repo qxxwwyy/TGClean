@@ -18,12 +18,6 @@
     <string name="global_keywords_hint">输入关键词</string>
     <string name="global_keywords_helper">每行一个关键词，匹配到的消息将被隐藏</string>
 
-    <!-- Reactions 区段 -->
-    <string name="reactions_filter">Reactions 过滤</string>
-    <string name="reactions_filter_desc">当消息收到指定表情反应超过阈值时自动隐藏</string>
-    <string name="reactions_emoji_hint">表情</string>
-    <string name="reactions_threshold_hint">阈值</string>
-
     <!-- 频道管理 -->
     <string name="section_channel_management">频道管理</string>
     <string name="channel_management_desc">在 Telegram 中打开目标频道后会自动出现在此列表中。点击频道可配置专属过滤规则。</string>

@@ -24,6 +24,7 @@ import com.google.android.material.textfield.TextInputEditText;
 import com.tgclean.App;
 import com.tgclean.R;
 import com.tgclean.config.FilterConfigWriter;
+import com.tgclean.config.ReactionsRule;
 import com.tgclean.receiver.ChannelReceiver;
 
 import org.json.JSONArray;
@@ -55,9 +56,6 @@ public class SettingsActivity extends AppCompatActivity {
 
     // ─── 控件 ───
     private MaterialSwitch switchEnabled;
-    private MaterialSwitch switchReactions;
-    private TextInputEditText editReactionsEmoji;
-    private TextInputEditText editReactionsThreshold;
     private RecyclerView recyclerRuleSets;
     private RuleSetAdapter ruleSetAdapter;
     private RecyclerView recyclerChannels;
@@ -107,9 +105,6 @@ public class SettingsActivity extends AppCompatActivity {
 
     private void initViews() {
         switchEnabled = findViewById(R.id.switch_enabled);
-        switchReactions = findViewById(R.id.switch_reactions);
-        editReactionsEmoji = findViewById(R.id.edit_reactions_emoji);
-        editReactionsThreshold = findViewById(R.id.edit_reactions_threshold);
 
         recyclerRuleSets = findViewById(R.id.recycler_rule_sets);
         recyclerRuleSets.setLayoutManager(new LinearLayoutManager(this));
@@ -155,10 +150,6 @@ public class SettingsActivity extends AppCompatActivity {
             writer = new FilterConfigWriter(remotePrefs);
 
             switchEnabled.setChecked(remotePrefs.getBoolean("filter_enabled", true));
-            switchReactions.setChecked(remotePrefs.getBoolean("reactions_filter_enabled", false));
-            editReactionsEmoji.setText(remotePrefs.getString("reactions_filter_emoji", "👎"));
-            editReactionsThreshold.setText(String.valueOf(
-                    remotePrefs.getInt("reactions_filter_threshold", 10)));
 
             // 执行旧数据迁移
             boolean migrated = writer.migrateLegacyIfNeeded();
@@ -226,6 +217,8 @@ public class SettingsActivity extends AppCompatActivity {
         List<ChannelSummary> channels = loadDiscoveredChannels();
         Map<Long, List<FilterConfigWriter.RuleSetData>> channelRuleSets = writer != null
                 ? writer.getChannelRuleSets() : Collections.emptyMap();
+        Map<Long, ReactionsRule> reactionsRules = writer != null
+                ? writer.getReactionsRules() : Collections.emptyMap();
 
         String lowerQuery = query.toLowerCase();
 
@@ -244,6 +237,8 @@ public class SettingsActivity extends AppCompatActivity {
                     ch.ruleSetNames.add(rs.name);
                 }
             }
+            ReactionsRule rr = reactionsRules.get(ch.id);
+            ch.reactionsBadge = rr != null && rr.enabled ? "⚡" + rr.describe() : null;
             filtered.add(ch);
         }
 
@@ -289,14 +284,6 @@ public class SettingsActivity extends AppCompatActivity {
         }
 
         writer.setEnabled(switchEnabled.isChecked());
-        writer.setReactionsFilterEnabled(switchReactions.isChecked());
-        writer.setReactionsFilterEmoji(editReactionsEmoji.getText().toString());
-        try {
-            writer.setReactionsFilterThreshold(
-                    Integer.parseInt(editReactionsThreshold.getText().toString()));
-        } catch (NumberFormatException e) {
-            writer.setReactionsFilterThreshold(10);
-        }
 
         Snackbar.make(findViewById(android.R.id.content),
                 getString(R.string.config_saved), Snackbar.LENGTH_SHORT).show();
@@ -385,6 +372,7 @@ public class SettingsActivity extends AppCompatActivity {
         final String name;
         final long lastSeen;
         List<String> ruleSetNames = new ArrayList<>();
+        String reactionsBadge;
 
         ChannelSummary(long id, String name, long lastSeen) {
             this.id = id;
@@ -415,11 +403,14 @@ public class SettingsActivity extends AppCompatActivity {
             holder.textName.setText(ch.name);
             holder.textId.setText(String.valueOf(ch.id));
 
+            List<String> badges = new ArrayList<>();
             if (!ch.ruleSetNames.isEmpty()) {
-                holder.textBadge.setText("🛡 " + String.join(", ", ch.ruleSetNames));
-            } else {
-                holder.textBadge.setText("—");
+                badges.add("🛡 " + String.join(", ", ch.ruleSetNames));
             }
+            if (ch.reactionsBadge != null) {
+                badges.add(ch.reactionsBadge);
+            }
+            holder.textBadge.setText(badges.isEmpty() ? "—" : String.join(" · ", badges));
         }
 
         @Override public int getItemCount() { return items.size(); }

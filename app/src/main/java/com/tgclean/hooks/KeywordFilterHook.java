@@ -205,8 +205,8 @@ public class KeywordFilterHook {
                                 Object val = fTlMessage.get(owner);
                                 if (val instanceof String) text = (String) val;
                             }
-                            if (text == null || text.isEmpty()) return result;
 
+                            // 表情规则与文本无关（纯媒体消息也参与），由引擎内部区分
                             Object reactions = null;
                             if (fTlReactions != null) {
                                 reactions = fTlReactions.get(owner);

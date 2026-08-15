@@ -25,14 +25,15 @@ import java.util.Set;
 public class FilterConfigWriter {
     private static final String TAG = "TGClean-ConfigWriter";
 
+    /** remote prefs 组名，与 hook 端 FilterConfig.PREFS_NAME 一致 */
+    public static final String PREFS_NAME = "tgclean_config";
+
     private static final String KEY_ENABLED = "filter_enabled";
     private static final String KEY_GLOBAL_KEYWORDS = "global_keywords";
     private static final String KEY_USE_REGEX = "use_regex";
     private static final String KEY_CHANNEL_RULES = "channel_rules"; // legacy
     private static final String KEY_WHITELIST = "whitelist";
-    private static final String KEY_REACTIONS_ENABLED = "reactions_filter_enabled";
-    private static final String KEY_REACTIONS_EMOJI = "reactions_filter_emoji";
-    private static final String KEY_REACTIONS_THRESHOLD = "reactions_filter_threshold";
+    private static final String KEY_REACTIONS_RULES = "reactions_channel_rules";
     // 注：频道发现数据存于 App 本地 prefs（ChannelReceiver 管理），不在本 remote prefs 中
     private static final String KEY_RULE_SETS = "rule_sets";
     private static final String KEY_RULE_SET_CHANNELS = "rule_set_channels";
@@ -316,19 +317,58 @@ public class FilterConfigWriter {
     }
 
     // ═════════════════════════════════════════════
-    // Reactions 过滤
+    // 每频道表情过滤规则
     // ═════════════════════════════════════════════
 
-    public void setReactionsFilterEnabled(boolean enabled) {
-        prefs.edit().putBoolean(KEY_REACTIONS_ENABLED, enabled).apply();
+    public Map<Long, ReactionsRule> getReactionsRules() {
+        Map<Long, ReactionsRule> result = new java.util.HashMap<>();
+        String raw = prefs.getString(KEY_REACTIONS_RULES, "");
+        if (raw == null || raw.isEmpty() || !raw.trim().startsWith("{")) return result;
+        try {
+            JSONObject obj = new JSONObject(raw);
+            Iterator<String> keys = obj.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                JSONObject r = obj.optJSONObject(key);
+                if (r == null) continue;
+                ReactionsRule rule = new ReactionsRule();
+                rule.enabled = r.optBoolean("enabled", false);
+                rule.whitelistMode = r.optBoolean("whitelist", true);
+                rule.emoji = r.optString("emoji", "");
+                rule.minCount = r.optInt("minCount", 0);
+                rule.emoji2 = r.optString("emoji2", "");
+                rule.maxCount = r.optInt("maxCount", 0);
+                try {
+                    result.put(Long.parseLong(key), rule);
+                } catch (NumberFormatException ignored) {}
+            }
+        } catch (JSONException e) {
+            Log.e(TAG, "Failed to parse reactions rules", e);
+        }
+        return result;
     }
 
-    public void setReactionsFilterEmoji(String emoji) {
-        prefs.edit().putString(KEY_REACTIONS_EMOJI, emoji).apply();
-    }
+    /** 保存单个频道的规则（enabled=false 时保留配置以便再次启用） */
+    public void setReactionsRule(long dialogId, ReactionsRule rule) {
+        try {
+            Map<Long, ReactionsRule> all = getReactionsRules();
+            all.put(dialogId, rule);
 
-    public void setReactionsFilterThreshold(int threshold) {
-        prefs.edit().putInt(KEY_REACTIONS_THRESHOLD, threshold).apply();
+            JSONObject obj = new JSONObject();
+            for (Map.Entry<Long, ReactionsRule> e : all.entrySet()) {
+                JSONObject r = new JSONObject();
+                r.put("enabled", e.getValue().enabled);
+                r.put("whitelist", e.getValue().whitelistMode);
+                r.put("emoji", e.getValue().emoji != null ? e.getValue().emoji : "");
+                r.put("minCount", e.getValue().minCount);
+                r.put("emoji2", e.getValue().emoji2 != null ? e.getValue().emoji2 : "");
+                r.put("maxCount", e.getValue().maxCount);
+                obj.put(String.valueOf(e.getKey()), r);
+            }
+            prefs.edit().putString(KEY_REACTIONS_RULES, obj.toString()).apply();
+        } catch (JSONException e) {
+            Log.e(TAG, "Failed to save reactions rule for " + dialogId, e);
+        }
     }
 
     // ═════════════════════════════════════════════

@@ -54,9 +54,9 @@ public class ModuleMain extends XposedModule {
             KeywordFilterHook.hook(cl, this, config);
             log(Log.INFO, TAG, "[3/4] KeywordFilterHook done.");
 
-            // Phase 3: 聊天辅助（复制频道 ID）
+            // Phase 3: 聊天辅助（复制频道 ID + 表情过滤配置）
             log(Log.INFO, TAG, "[4/4] Hooking ChatHelperHook...");
-            ChatHelperHook.hook(cl, this);
+            ChatHelperHook.hook(cl, this, config);
             log(Log.INFO, TAG, "[4/4] ChatHelperHook done.");
 
             log(Log.INFO, TAG, "====================================");

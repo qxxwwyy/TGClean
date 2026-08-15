@@ -4,7 +4,7 @@
 - **仓库**: https://github.com/qxxwwyy/TGClean
 - **正式版本**: v1.0.0
 - **开发分支**: `feature/in-app-ui`（PR #1）
-- **当前测试版本**: v16（review 修复迭代，versionCode 3 / 1.1.1）
+- **当前测试版本**: v17（每频道表情过滤 2.0，versionCode 4 / 1.2.0）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
@@ -31,6 +31,8 @@ Telegram 进程（Hook 端）          TGClean App 进程
 │ ├─ ChatHelperHook   │──Broadcast──► ChannelReceiver │
 │ │  ├─ 频道自动发现  │          │ ├─ 存入 discovered_ │
 │ │  ├─ 复制频道ID菜单│          │ │   channels prefs  │
+│ │  ├─ ⚡表情过滤菜单 │─规则保存──► ├─ RemoteConfigStore│
+│ │  │  (弹窗配置)    │          │ │  → 写 remote prefs│
 │ │  └─ 首次批量扫描  │          │ ├─ SettingsActivity │
 │ ├─ KeywordFilterHook│          │ │  ├─ 规则集管理    │
 │ │  └─ 双阶段过滤   │          │ │  ├─ 频道汇总展示  │
@@ -91,9 +93,7 @@ app/src/main/res/layout/
 | `rule_set_channels` | JSON object | 规则集↔频道映射 `{ruleSetId: [dialogId, ...]}` |
 | `global_keywords` | string | 全局关键词（换行分隔，兜底匹配） |
 | `whitelist` | JSON array | 白名单频道 ID |
-| `reactions_filter_enabled` | boolean | Reactions 过滤开关 |
-| `reactions_filter_emoji` | string | 目标 emoji |
-| `reactions_filter_threshold` | int | 过滤阈值 |
+| `reactions_channel_rules` | JSON object | 每频道表情过滤规则 `{dialogId: {enabled, whitelist, emoji, minCount, emoji2, maxCount}}` |
 | `migrated_legacy_v2` | boolean | 旧数据迁移标记 |
 
 频道发现数据存储在 App 端 `discovered_channels` prefs（`channels_json` key）。
@@ -109,6 +109,7 @@ app/src/main/res/layout/
 8. **BottomSheet 注入已废弃**（ClassLoader 冲突 + SharedPreferences 写入崩溃）
 9. **ContentProvider 方案已废弃**（Android 11+ resolveContentProvider 返回 NULL）
 10. **过滤不做跨实例去重**（v16）：同一 TL 消息会多次构造 MessageObject（通知预览/会话列表/聊天窗口），按 (dialogId,msgId) 去重跳过标记会导致打开频道时漏过滤"复活"，每实例独立评估
+11. **每频道表情过滤**（v17，取代旧全局 reactions）：白名单模式只显示达标消息（如 ❤️≥10 且 👎≤20），黑名单模式隐藏达标消息；在 TG 频道菜单直接配置（headerItem 注入 ⚡ 项 + framework AlertDialog 弹窗 + 表情快速选择行），保存经显式广播 → ChannelReceiver → RemoteConfigStore（服务未就绪排队）写 remote prefs → 框架实时推送回 TG 进程热更新；匹配基于 TL_reactionEmoji.emoticon 字符串精确相等，自定义表情(document_id)/付费星星无法匹配
 
 ## 发布规则
 - **只有用户明确说明"正式版本"时才发布 GitHub Release**

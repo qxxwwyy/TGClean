@@ -43,9 +43,7 @@ public class FilterConfig {
     private static final String KEY_USE_REGEX = "use_regex";
     private static final String KEY_CHANNEL_RULES = "channel_rules"; // legacy
     private static final String KEY_WHITELIST = "whitelist";
-    private static final String KEY_REACTIONS_ENABLED = "reactions_filter_enabled";
-    private static final String KEY_REACTIONS_EMOJI = "reactions_filter_emoji";
-    private static final String KEY_REACTIONS_THRESHOLD = "reactions_filter_threshold";
+    private static final String KEY_REACTIONS_RULES = "reactions_channel_rules";
     private static final String KEY_RULE_SETS = "rule_sets";
     private static final String KEY_RULE_SET_CHANNELS = "rule_set_channels";
 
@@ -200,19 +198,41 @@ public class FilterConfig {
     }
 
     // ═════════════════════════════════════════════
-    // Reactions 过滤
+    // 每频道表情过滤规则
     // ═════════════════════════════════════════════
 
-    public boolean isReactionsFilterEnabled() {
-        return prefs.getBoolean(KEY_REACTIONS_ENABLED, false);
-    }
-
-    public String getReactionsFilterEmoji() {
-        return prefs.getString(KEY_REACTIONS_EMOJI, "👎");
-    }
-
-    public int getReactionsFilterThreshold() {
-        return prefs.getInt(KEY_REACTIONS_THRESHOLD, 10);
+    /**
+     * 获取 dialogId → 表情过滤规则 的映射。
+     * 旧版全局 reactions 配置（reactions_filter_*）已被此机制取代，不再读取。
+     */
+    public Map<Long, ReactionsRule> getReactionsChannelRules() {
+        String raw = prefs.getString(KEY_REACTIONS_RULES, "");
+        if (raw == null || raw.isEmpty() || !raw.trim().startsWith("{")) {
+            return new HashMap<>();
+        }
+        Map<Long, ReactionsRule> result = new HashMap<>();
+        try {
+            JSONObject obj = new JSONObject(raw);
+            Iterator<String> keys = obj.keys();
+            while (keys.hasNext()) {
+                String key = keys.next();
+                JSONObject r = obj.optJSONObject(key);
+                if (r == null) continue;
+                ReactionsRule rule = new ReactionsRule();
+                rule.enabled = r.optBoolean("enabled", false);
+                rule.whitelistMode = r.optBoolean("whitelist", true);
+                rule.emoji = r.optString("emoji", "");
+                rule.minCount = r.optInt("minCount", 0);
+                rule.emoji2 = r.optString("emoji2", "");
+                rule.maxCount = r.optInt("maxCount", 0);
+                try {
+                    result.put(Long.parseLong(key), rule);
+                } catch (NumberFormatException ignored) {}
+            }
+        } catch (JSONException e) {
+            module.log(Log.WARN, TAG, "Failed to parse reactions rules JSON: " + e.getMessage());
+        }
+        return result;
     }
 
     // ═════════════════════════════════════════════

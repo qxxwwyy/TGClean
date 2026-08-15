@@ -3,6 +3,7 @@ package com.tgclean.filter;
 import android.content.SharedPreferences;
 
 import com.tgclean.config.FilterConfig;
+import com.tgclean.config.ReactionsRule;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -17,11 +18,12 @@ import java.util.regex.Pattern;
  * 关键词匹配引擎
  *
  * 匹配优先级：
- * 1. 白名单 → 放行（包括 Reactions 检查在内全部跳过）
+ * 1. 白名单 → 放行（关键词与表情检查在内全部跳过）
  * 2. 规则集匹配 → 检查该规则集是否覆盖了当前频道，再匹配关键词
  * 3. 旧版分频道规则（兼容迁移期）
  * 4. 全局关键词兜底
- * 5. Reactions 过滤（仅非白名单频道）
+ * 5. 每频道表情规则（与文本无关，纯媒体消息也参与）：
+ *    白名单模式只显示达标消息，黑名单模式隐藏达标消息
  *
  * 支持：纯文本匹配 + 正则匹配 + 每规则集独立正则开关
  *
@@ -45,6 +47,7 @@ public class KeywordEngine {
         final Map<Long, Set<String>> channelKeywords;
         final Map<Long, List<Pattern>> channelPatterns;
         final Set<Long> whitelist;
+        final Map<Long, ReactionsRule> reactionsRules;
 
         RulesSnapshot(List<FilterConfig.RuleSet> ruleSets,
                       Map<String, Set<Long>> ruleSetChannels,
@@ -53,7 +56,8 @@ public class KeywordEngine {
                       List<Pattern> globalPatterns,
                       Map<Long, Set<String>> channelKeywords,
                       Map<Long, List<Pattern>> channelPatterns,
-                      Set<Long> whitelist) {
+                      Set<Long> whitelist,
+                      Map<Long, ReactionsRule> reactionsRules) {
             this.ruleSets = ruleSets;
             this.ruleSetChannels = ruleSetChannels;
             this.ruleSetPatterns = ruleSetPatterns;
@@ -62,6 +66,7 @@ public class KeywordEngine {
             this.channelKeywords = channelKeywords;
             this.channelPatterns = channelPatterns;
             this.whitelist = whitelist;
+            this.reactionsRules = reactionsRules;
         }
     }
 
@@ -117,7 +122,8 @@ public class KeywordEngine {
                 config.getGlobalPatterns(),
                 config.getChannelKeywords(),
                 config.getChannelPatterns(),
-                config.getWhitelist());
+                config.getWhitelist(),
+                config.getReactionsChannelRules());
     }
 
     // ═════════════════════════════════════════════
@@ -125,38 +131,50 @@ public class KeywordEngine {
     // ═════════════════════════════════════════════
 
     /**
-     * 检查消息是否应被过滤（关键词 + Reactions）
+     * 检查消息是否应被过滤（关键词 + 每频道表情规则）
      *
-     * 白名单频道：关键词和 Reactions 全部跳过，直接放行。
+     * 白名单频道：关键词和表情规则全部跳过，直接放行。
+     * 表情规则与文本无关（纯媒体消息也参与），关键词部分仅对有文本的消息生效。
      *
-     * @param text     消息文本
+     * @param text     消息文本（可为 null/空）
      * @param dialogId 对话ID（负数=频道/群组，正数=私聊）
      * @param reactions TLRPC.Message.reactions（可为 null）
      * @return true=应过滤
      */
     public boolean shouldFilter(String text, long dialogId, Object reactions) {
-        if (text == null || text.isEmpty()) return false;
-
         RulesSnapshot rules = snapshot;
 
-        // 1. 白名单检查 — 最高优先级，含 Reactions 在内全部放行
+        // 1. 白名单检查 — 最高优先级，含表情规则在内全部放行
         if (rules.whitelist.contains(dialogId)) return false;
 
-        // 2. 规则集匹配（核心新逻辑）
+        // 2~4. 关键词匹配（仅对有文本的消息）
+        if (text != null && !text.isEmpty() && matchKeywords(text, dialogId, rules)) {
+            return true;
+        }
+
+        // 5. 每频道表情规则
+        ReactionsRule rule = rules.reactionsRules.get(dialogId);
+        if (rule != null && rule.enabled) {
+            return applyReactionsRule(reactions, rule);
+        }
+
+        return false;
+    }
+
+    private boolean matchKeywords(String text, long dialogId, RulesSnapshot rules) {
+        // 规则集匹配
         for (FilterConfig.RuleSet rs : rules.ruleSets) {
             if (!rs.enabled) continue;
 
-            // 检查该规则集是否覆盖了此频道
             Set<Long> channels = rules.ruleSetChannels.get(rs.id);
             if (channels == null || !channels.contains(dialogId)) continue;
 
-            // 关键词匹配
             if (matchRuleSetKeywords(text, rs, rules.ruleSetPatterns)) {
                 return true;
             }
         }
 
-        // 3. 旧版分频道关键词（兼容迁移期）
+        // 旧版分频道关键词（兼容迁移期）
         Set<String> channelKw = rules.channelKeywords.get(dialogId);
         if (channelKw != null) {
             for (String keyword : channelKw) {
@@ -171,7 +189,7 @@ public class KeywordEngine {
             }
         }
 
-        // 4. 全局关键词检查
+        // 全局关键词兜底
         for (String keyword : rules.globalKeywords) {
             if (text.contains(keyword)) return true;
         }
@@ -179,12 +197,6 @@ public class KeywordEngine {
         for (Pattern pattern : rules.globalPatterns) {
             if (pattern.matcher(text).find()) return true;
         }
-
-        // 5. Reactions 过滤（白名单已在第1步放行，这里只会处理非白名单频道）
-        if (reactions != null && config.isReactionsFilterEnabled()) {
-            return checkReactions(reactions);
-        }
-
         return false;
     }
 
@@ -211,7 +223,7 @@ public class KeywordEngine {
     }
 
     // ═════════════════════════════════════════════
-    // Reactions 过滤
+    // 每频道表情规则匹配
     // ═════════════════════════════════════════════
 
     /**
@@ -242,18 +254,35 @@ public class KeywordEngine {
         return null;
     }
 
-    private boolean checkReactions(Object reactions) {
+    /**
+     * 应用每频道表情规则。
+     * 白名单模式：达标 → 显示（false），不达标 → 过滤（true）。
+     * 黑名单模式：达标 → 过滤（true），不达标 → 显示（false）。
+     */
+    private boolean applyReactionsRule(Object reactions, ReactionsRule rule) {
+        int likeCount = countReaction(reactions, rule.emoji);
+        if (rule.whitelistMode) {
+            if (likeCount < rule.minCount) return true;             // 正面不达标 → 隐藏
+            if (rule.hasEmoji2()
+                    && countReaction(reactions, rule.emoji2) > rule.maxCount) {
+                return true;                                        // 负面超限 → 隐藏
+            }
+            return false;
+        } else {
+            return likeCount >= rule.minCount;                      // 达标 → 隐藏
+        }
+    }
+
+    /** 统计指定标准 emoji 的 reaction 数量（reactions 为 null 时返回 0） */
+    private static int countReaction(Object reactions, String emoji) {
+        if (reactions == null || emoji == null || emoji.isEmpty()) return 0;
         try {
             Field resultsField = cachedField(reactions.getClass(), "results");
-            if (resultsField == null) return false;
+            if (resultsField == null) return 0;
             Object results = resultsField.get(reactions);
-            if (!(results instanceof List)) return false;
+            if (!(results instanceof List)) return 0;
 
-            List<?> reactionCountList = (List<?>) results;
-            String targetEmoji = config.getReactionsFilterEmoji();
-            int threshold = config.getReactionsFilterThreshold();
-
-            for (Object reactionCount : reactionCountList) {
+            for (Object reactionCount : (List<?>) results) {
                 if (reactionCount == null) continue;
                 Class<?> rcClass = reactionCount.getClass();
 
@@ -261,25 +290,20 @@ public class KeywordEngine {
                 if (reactionField == null) continue;
                 Object reaction = reactionField.get(reactionCount);
 
-                if (reaction != null && reaction.getClass().getSimpleName().equals("TL_reactionEmoji")) {
-                    Field emoticonField = cachedField(reaction.getClass(), "emoticon");
-                    if (emoticonField == null) continue;
-                    String emoticon = (String) emoticonField.get(reaction);
-
-                    if (targetEmoji.equals(emoticon)) {
-                        Field countField = cachedField(rcClass, "count");
-                        if (countField == null) continue;
-                        int count = countField.getInt(reactionCount);
-
-                        if (count >= threshold) {
-                            return true;
-                        }
-                    }
+                // 仅 TL_reactionEmoji 有 emoticon 字符串；自定义表情(document_id)/付费星星无法按字符匹配
+                if (reaction == null || !reaction.getClass().getSimpleName().equals("TL_reactionEmoji")) {
+                    continue;
                 }
+                Field emoticonField = cachedField(reaction.getClass(), "emoticon");
+                if (emoticonField == null) continue;
+                if (!emoji.equals(emoticonField.get(reaction))) continue;
+
+                Field countField = cachedField(rcClass, "count");
+                if (countField == null) continue;
+                return countField.getInt(reactionCount);
             }
-        } catch (Throwable t) {
-            // Reactions检查失败不影响整体过滤
+        } catch (Throwable ignored) {
         }
-        return false;
+        return 0;
     }
 }
