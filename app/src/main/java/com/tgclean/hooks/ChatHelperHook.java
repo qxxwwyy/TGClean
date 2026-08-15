@@ -10,6 +10,7 @@ import android.view.View;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
 
 import io.github.libxposed.api.XposedModule;
@@ -101,10 +102,12 @@ public class ChatHelperHook {
     }
 
     /**
-     * 一次性扫描 Telegram 全部频道列表，批量发送到 TGClean App
+     * 一次性扫描 Telegram 全部频道/超级群组列表，批量发送到 TGClean App
      *
-     * 通过反射读取 MessagesController.dialogsChannelsOnly（ArrayList<TLRPC.Dialog>），
-     * 遍历每个 Dialog.id，用 DialogObject.getName() 获取频道名。
+     * 优先走 MessagesController.getAllDialogs() + DialogObject.isChannel() 过滤
+     * （同时覆盖广播频道和 megagroup，且不依赖 sortDialogs 时机）；
+     * 失败时回退读取 dialogsChannelsOnly 字段（仅广播频道，megagroup 在
+     * dialogsGroupsOnly 中）。每个 Dialog.id 用 DialogObject.getName() 取名。
      * 全部频道打包成 JSON 放进单个广播的 extras，避免主线程逐个
      * sendBroadcast（每个都是一次 binder IPC，几百频道会卡 UI）。
      *
@@ -118,18 +121,41 @@ public class ChatHelperHook {
             Method getInstance = mcClass.getMethod("getInstance", int.class);
             Object mc = getInstance.invoke(null, accountIdx);
 
-            // 读取 dialogsChannelsOnly 字段
-            Field channelsField = findFieldInHierarchy(mcClass, "dialogsChannelsOnly");
-            if (channelsField == null) {
-                module.log(Log.WARN, TAG, "dialogsChannelsOnly field not found");
-                return false;
+            List<?> channels = null;
+
+            // 路径1：getAllDialogs() + isChannel（频道 + megagroup）
+            try {
+                Class<?> dialogClass = cl.loadClass("org.telegram.tgnet.TLRPC$Dialog");
+                Method getAll = mcClass.getMethod("getAllDialogs");
+                Method isChannel = cl.loadClass("org.telegram.messenger.DialogObject")
+                        .getMethod("isChannel", dialogClass);
+                List<?> all = (List<?>) getAll.invoke(mc);
+                if (all != null && !all.isEmpty()) {
+                    List<Object> filtered = new ArrayList<>();
+                    for (Object d : all) {
+                        if (d != null && Boolean.TRUE.equals(isChannel.invoke(null, d))) {
+                            filtered.add(d);
+                        }
+                    }
+                    if (!filtered.isEmpty()) channels = filtered;
+                }
+            } catch (Throwable t) {
+                module.log(Log.WARN, TAG, "getAllDialogs path failed: " + t.getMessage());
             }
-            channelsField.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            List<?> channels = (List<?>) channelsField.get(mc);
+
+            // 路径2：回退 dialogsChannelsOnly（仅广播频道）
+            if (channels == null) {
+                Field channelsField = findFieldInHierarchy(mcClass, "dialogsChannelsOnly");
+                if (channelsField == null) {
+                    module.log(Log.WARN, TAG, "dialogsChannelsOnly field not found");
+                    return false;
+                }
+                channelsField.setAccessible(true);
+                channels = (List<?>) channelsField.get(mc);
+            }
 
             if (channels == null || channels.isEmpty()) {
-                module.log(Log.INFO, TAG, "dialogsChannelsOnly empty, will retry on next onResume");
+                module.log(Log.INFO, TAG, "channel list empty, will retry on next onResume");
                 return false;
             }
 

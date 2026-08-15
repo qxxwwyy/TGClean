@@ -25,28 +25,30 @@ import io.github.libxposed.api.XposedModule;
  * 这样 rowCount 正确反映过滤后的消息数，零占位。
  *
  * 性能优化：
- * - 使用 filteredIds Set 去重，避免同一消息被12个构造函数重载重复标记
+ * - 同一 MessageObject 实例只评估一次（构造函数委托链上 deleted 标记幂等短路）
  * - 缓存所有反射字段为 static volatile
  * - cachedThis0Field 缓存内部类 this$0 字段
+ *
+ * ⚠️ 不做跨实例去重：同一 TL 消息会被多次构造 MessageObject（通知预览、
+ * 会话列表、聊天窗口各一份实例）。若基于 (dialogId, msgId) 去重跳过标记，
+ * 用户真正打开频道时构造的实例将漏标记 → 已过滤消息"复活"。
+ * 匹配计算基于内存快照，成本可接受，因此每个实例独立评估。
  *
  * 日志tag: TGClean-Keyword
  */
 public class KeywordFilterHook {
     private static final String TAG = "TGClean-Keyword";
-    private static final int MAX_FILTERED_IDS = 10000;
-
-    // ─── 去重集合：避免同一消息被多个构造函数重载重复标记 ───
-    private static final Set<Long> pendingFilterIds = ConcurrentHashMap.newKeySet();
+    private static final int MAX_LOGGED_KEYS = 10000;
 
     /**
-     * 组合去重 key：msgId 是每频道独立自增的，跨频道必然碰撞
+     * 日志去重 key：msgId 是每频道独立自增的，跨频道必然碰撞
      * （频道A的100和频道B的100是两条不同消息）。
-     * 用 dialogId 高32位 + msgId 低32位 组成全局唯一 key。
+     * 用 dialogId 高32位 + msgId 低32位 组成 key（仅用于日志限流）。
      */
     private static long comboKey(long dialogId, int msgId) {
         return (dialogId << 32) | (msgId & 0xffffffffL);
     }
-    private static final Set<Integer> loggedIds = ConcurrentHashMap.newKeySet();
+    private static final Set<Long> loggedKeys = ConcurrentHashMap.newKeySet();
 
     // ─── 反射字段缓存 ───
     private static volatile Field fMessageOwner;    // MessageObject.messageOwner
@@ -189,13 +191,7 @@ public class KeywordFilterHook {
                             Object owner = fMessageOwner.get(thisObj);
                             if (owner == null) return result;
 
-                            // 获取msgId
-                            int msgId = 0;
-                            if (fTlMessageId != null) {
-                                msgId = fTlMessageId.getInt(owner);
-                            }
-
-                            // dialogId 提前计算（去重key需要；msgId跨频道碰撞，必须组合）
+                            // dialogId
                             long dialogId = 0;
                             if (fTlDialogId != null) {
                                 dialogId = fTlDialogId.getLong(owner);
@@ -203,9 +199,6 @@ public class KeywordFilterHook {
                             if (dialogId == 0) {
                                 dialogId = computeDialogId(owner);
                             }
-
-                            // 如果这个 (dialogId, msgId) 已在pending集合中，说明其他构造函数已标记，跳过
-                            if (msgId != 0 && pendingFilterIds.contains(comboKey(dialogId, msgId))) return result;
 
                             String text = null;
                             if (fTlMessage != null) {
@@ -221,18 +214,14 @@ public class KeywordFilterHook {
 
                             if (engine.shouldFilter(text, dialogId, reactions)) {
                                 fDeletedField.setBoolean(thisObj, true);
-                                // 加入pending集合，防止其他构造函数重复处理
-                                if (msgId != 0) {
-                                    pendingFilterIds.add(comboKey(dialogId, msgId));
-                                    // 防止内存泄漏
-                                    if (pendingFilterIds.size() > MAX_FILTERED_IDS) {
-                                        pendingFilterIds.clear();
-                                    }
+                                // 去重日志：同一 (dialogId, msgId) 只打印一次
+                                int msgId = 0;
+                                if (fTlMessageId != null) {
+                                    msgId = fTlMessageId.getInt(owner);
                                 }
-                                // 去重日志：同一msgId只打印一次
-                                if (msgId != 0 && loggedIds.add(msgId)) {
-                                    if (loggedIds.size() > MAX_FILTERED_IDS) {
-                                        loggedIds.clear();
+                                if (msgId != 0 && loggedKeys.add(comboKey(dialogId, msgId))) {
+                                    if (loggedKeys.size() > MAX_LOGGED_KEYS) {
+                                        loggedKeys.clear();
                                     }
                                     logFiltered(module, owner);
                                 }
@@ -302,7 +291,7 @@ public class KeywordFilterHook {
                                 Object msgObj = it.next();
                                 try {
                                     if (fDeletedField.getBoolean(msgObj)) {
-                                        // 同步清理 messagesDict
+                                        // 同步清理 messagesDict（SparseArray[]，两份分别对应置顶/普通区）
                                         if (fMessagesDictField != null) {
                                             try {
                                                 Object msgOwner = fMessageOwner.get(msgObj);
@@ -323,13 +312,6 @@ public class KeywordFilterHook {
                                                             }
                                                         }
                                                     }
-                                                    // 从pending集合中移除（组合key，与阶段1一致）
-                                                    long dId = 0;
-                                                    if (fTlDialogId != null) {
-                                                        dId = fTlDialogId.getLong(msgOwner);
-                                                    }
-                                                    if (dId == 0) dId = computeDialogId(msgOwner);
-                                                    pendingFilterIds.remove(comboKey(dId, msgId));
                                                 }
                                             } catch (Throwable ignored) {}
                                         }

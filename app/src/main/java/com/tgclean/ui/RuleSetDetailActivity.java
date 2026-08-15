@@ -241,6 +241,11 @@ public class RuleSetDetailActivity extends AppCompatActivity {
     }
 
     private void showAddKeywordDialog() {
+        if (writer == null || currentRuleSet == null) {
+            Snackbar.make(findViewById(android.R.id.content),
+                    "配置服务未就绪，请稍后重试", Snackbar.LENGTH_LONG).show();
+            return;
+        }
         EditText editKeyword = new EditText(this);
         editKeyword.setHint("输入关键词");
         editKeyword.setSingleLine(true);
@@ -271,6 +276,7 @@ public class RuleSetDetailActivity extends AppCompatActivity {
     }
 
     private void selectAllChannels(boolean selected) {
+        if (writer == null) return;
         for (ChannelItem ch : allChannels) {
             if (selected) {
                 currentChannels.add(ch.id);
@@ -432,6 +438,7 @@ public class RuleSetDetailActivity extends AppCompatActivity {
             holder.checkbox.setOnCheckedChangeListener(null);
             holder.checkbox.setChecked(checkedChannels.contains(ch.id));
             holder.checkbox.setOnCheckedChangeListener((btn, checked) -> {
+                if (writer == null) return;
                 if (checked) {
                     checkedChannels.add(ch.id);
                 } else {

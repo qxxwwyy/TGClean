@@ -4,7 +4,7 @@
 - **仓库**: https://github.com/qxxwwyy/TGClean
 - **正式版本**: v1.0.0
 - **开发分支**: `feature/in-app-ui`（PR #1）
-- **当前测试版本**: v15（规则集系统重构）
+- **当前测试版本**: v16（review 修复迭代，versionCode 3 / 1.1.1）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
@@ -102,12 +102,13 @@ app/src/main/res/layout/
 1. **规则集为核心过滤单元**（v15+），关键词从规则集角度管理，频道变为被动方
 2. **libxposed API 101**（非102，102未发布Maven Central）
 3. **Java**（非Kotlin，参考项目全为Java，CI构建零障碍）
-4. **双阶段过滤**（构造函数标记deleted=true + updateRowsSafe清理remove）
+4. **双阶段过滤**（构造函数标记deleted=true + updateRowsSafe清理remove）— 与 TG 原生删除机制一致（TG 自己删消息也是置 deleted 后从 messages 移除），设计已对照 layer 228+ 源码验证
 5. **component-explicit broadcast** 跨进程通信（绕过 Android 11+ package visibility）
 6. **ChatActivity.onResume** 作为 hook 点（非 onCreateOptionsMenu，Telegram 不使用标准菜单系统）
-7. **频道批量发现**：首次 onResume 反射 `MessagesController.dialogsChannelsOnly` 扫描所有频道
+7. **频道批量发现**：首次 onResume 反射扫描频道，优先 `getAllDialogs()+DialogObject.isChannel()`（覆盖频道+megagroup），回退 `dialogsChannelsOnly`（仅广播频道）
 8. **BottomSheet 注入已废弃**（ClassLoader 冲突 + SharedPreferences 写入崩溃）
 9. **ContentProvider 方案已废弃**（Android 11+ resolveContentProvider 返回 NULL）
+10. **过滤不做跨实例去重**（v16）：同一 TL 消息会多次构造 MessageObject（通知预览/会话列表/聊天窗口），按 (dialogId,msgId) 去重跳过标记会导致打开频道时漏过滤"复活"，每实例独立评估
 
 ## 发布规则
 - **只有用户明确说明"正式版本"时才发布 GitHub Release**
@@ -123,3 +124,21 @@ app/src/main/res/layout/
 - `materialButtonTextStyle` attr 在 Material3 中不存在，用 `borderlessButtonStyle`
 - CI artifact 名为 `TGClean-debug`（非 `app-debug`）
 - Chromium snap 存根不可用，Playwright 路径含版本号可能过期
+
+## v16 review 结论（2026-08-14，对照 TG master 12.9.2 + libxposed 101.0.1）
+**修复的 bug**：
+- KeywordFilterHook：删除 pendingFilterIds 跨实例去重（复活漏过滤），日志去重改 (dialogId,msgId) 组合 key
+- ChatHelperHook：批量扫描改 getAllDialogs()+isChannel()，修复 megagroup 不被发现
+- RuleSetDetailActivity：writer/currentRuleSet 未就绪时勾选频道/添加关键词 NPE 崩溃
+- FilterConfigWriter：删除 getDiscoveredChannels()（读错存储的死代码）
+- SponsoredMessageHook：误导性日志文案
+
+**对照源码确认有效、勿再怀疑的设计**：
+- `ChatActivity.messagesDict` 是 `SparseArray[]`（两份），`instanceof Object[]` 遍历 + `remove(int)` 有效
+- `ActionBarMenuItem.addSubItem(int,int,CharSequence)` 存在（ActionBarMenuItem.java L524），headerItem 注入有效
+- `BaseFragment` 有 `getContext()`（L658），ChatActivity 是 Fragment 非 Activity
+- `MessagesController.getSponsoredMessages(long)` 返回 null 安全（两个调用点都判 null）
+- `updateRowsSafe()` 是 `ChatActivity$ChatActivityAdapter` 的 public 方法
+- 现代模块打包：`META-INF/xposed/{java_init.list,module.prop,scope.list}`，manifest 无需 xposed meta-data
+- API 101（Maven Central `hook().intercept(lambda)` 模型）依赖 LSPosed 新分支实现（上游 stable 1.9.2 仅支持注解式 API 100）；本机 Android 16 环境已实测可用
+- RemotePreferences 变更由框架按 key 实时推送到 hook 进程，KeywordEngine 快照热更新，配置无需重启 TG

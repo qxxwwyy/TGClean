@@ -33,7 +33,9 @@ public class SponsoredMessageHook {
             Class<?> chatActivityClass = cl.loadClass("org.telegram.ui.ChatActivity");
             Method addMethod = findMethod(chatActivityClass, "addSponsoredMessages");
             if (addMethod == null) {
-                module.log(Log.WARN, TAG, "addSponsoredMessages not found, trying hookAllMethods");
+                module.log(Log.WARN, TAG,
+                        "addSponsoredMessages not found in this TG version, skipping "
+                                + "(getSponsoredMessages / TLdeserialize hooks still active)");
                 return;
             }
             module.hook(addMethod).intercept(chain -> {

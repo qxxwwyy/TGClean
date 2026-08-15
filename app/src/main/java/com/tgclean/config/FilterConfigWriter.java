@@ -33,7 +33,7 @@ public class FilterConfigWriter {
     private static final String KEY_REACTIONS_ENABLED = "reactions_filter_enabled";
     private static final String KEY_REACTIONS_EMOJI = "reactions_filter_emoji";
     private static final String KEY_REACTIONS_THRESHOLD = "reactions_filter_threshold";
-    private static final String KEY_DISCOVERED_CHANNELS = "discovered_channels";
+    // 注：频道发现数据存于 App 本地 prefs（ChannelReceiver 管理），不在本 remote prefs 中
     private static final String KEY_RULE_SETS = "rule_sets";
     private static final String KEY_RULE_SET_CHANNELS = "rule_set_channels";
     private static final String KEY_MIGRATED_LEGACY = "migrated_legacy_v2";
@@ -332,28 +332,6 @@ public class FilterConfigWriter {
     }
 
     // ═════════════════════════════════════════════
-    // 频道发现列表
-    // ═════════════════════════════════════════════
-
-    public List<DiscoveredChannel> getDiscoveredChannels() {
-        List<DiscoveredChannel> result = new ArrayList<>();
-        String raw = prefs.getString(KEY_DISCOVERED_CHANNELS, "");
-        if (raw == null || raw.isEmpty() || !raw.trim().startsWith("[")) return result;
-        try {
-            JSONArray arr = new JSONArray(raw);
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject obj = arr.getJSONObject(i);
-                long id = obj.optLong("id", 0);
-                String name = obj.optString("name", String.valueOf(id));
-                if (id != 0) result.add(new DiscoveredChannel(id, name));
-            }
-        } catch (JSONException e) {
-            Log.e(TAG, "Failed to parse discovered channels", e);
-        }
-        return result;
-    }
-
-    // ═════════════════════════════════════════════
     // 内部工具
     // ═════════════════════════════════════════════
 
@@ -448,19 +426,6 @@ public class FilterConfigWriter {
          */
         public static String generateId() {
             return "rs_" + System.currentTimeMillis();
-        }
-    }
-
-    /**
-     * 发现的频道数据模型
-     */
-    public static class DiscoveredChannel {
-        public final long id;
-        public final String name;
-
-        public DiscoveredChannel(long id, String name) {
-            this.id = id;
-            this.name = name;
         }
     }
 }
