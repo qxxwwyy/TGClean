@@ -144,6 +144,7 @@ public class KeywordFilterHook {
             target.setAccessible(true);
 
             module.hook(target).intercept(chain -> {
+                Object[] newNotifArgs = null;
                 try {
                     List<Object> args = chain.getArgs();
                     // varargs 直接传数组时 getArgs().get(2) 就是 NotificationCenter 的 Object[]
@@ -154,17 +155,23 @@ public class KeywordFilterHook {
                             List<?> arr = (List<?>) notifArgs[2];
                             ArrayList<Object> kept = filterBatch(arr, engine, module);
                             if (kept.size() != arr.size()) {
-                                Object[] newNotifArgs = notifArgs.clone();
+                                newNotifArgs = notifArgs.clone();
                                 // count 必须与数组同步缩减：TG 用 size!=count 判断历史是否到底
                                 newNotifArgs[1] = kept.size();
                                 newNotifArgs[2] = kept;
-                                return chain.proceed(new Object[]{
-                                        args.get(0), args.get(1), newNotifArgs});
+
+                                maybeCascade(chain.getThisObject(), module, notifArgs,
+                                        arr, kept);
                             }
                         }
                     }
                 } catch (Throwable t) {
                     module.log(Log.ERROR, TAG, "messagesDidLoad filter error", t);
+                }
+                if (newNotifArgs != null) {
+                    List<Object> args = chain.getArgs();
+                    return chain.proceed(new Object[]{
+                            args.get(0), args.get(1), newNotifArgs});
                 }
                 return chain.proceed();
             });
@@ -176,6 +183,173 @@ public class KeywordFilterHook {
                     "FATAL: failed to hook didReceivedNotification_messagesDidLoad — "
                             + "过滤将完全不生效! " + t.getMessage(), t);
         }
+    }
+
+    // ═══════════════════════════════════════════════════
+    // 级联加载：批次被滤空/剩余过少 → 自动请求更早历史
+    //
+    // 背景：TG 的向上翻页依赖已有行可滚动（loadingUpRow 进入可视区触发，
+    // 且 messages 为空时 loadingUpRow=-5 连转圈行都没有）。白名单把整批
+    // 消息滤空后页面显示"暂无消息"，用户无法滚动 → 历史无法继续加载 →
+    // 筛选池无法扩大（结构性死锁）。
+    //
+    // 方案：过滤导致 kept < CASCADE_MIN_ROWS 且未到历史尽头（isEnd=false）
+    // 时，镜像 TG 自身滚动加载的调用方式（ChatActivity L12375 模式：
+    // waitingForLoad.add(lastLoadIndex) → loadMessages(..., lastLoadIndex++)）
+    // 主动请求更早的 50 条。新批次仍走本 hook → 命中则继续级联，直到：
+    // 出现足量达标消息 / 历史到底（isEnd=true）/ 达到安全上限。
+    // ═══════════════════════════════════════════════════
+
+    /** 剩余行数低于此值视为"无法滚动"（一屏约 8-12 条消息） */
+    private static final int CASCADE_MIN_ROWS = 5;
+    /** 级联安全上限（30 批 × 50 条 ≈ 1500 条），防止在大型频道失控 */
+    private static final int CASCADE_MAX_BATCHES = 30;
+    private static final int CASCADE_BATCH_SIZE = 50;
+    /** classGuid → 已级联批次数（classGuid 每 ChatActivity 实例唯一） */
+    private static final ConcurrentHashMap<Integer, Integer> cascadeCount =
+            new ConcurrentHashMap<>();
+
+    private static void maybeCascade(Object chatActivity, XposedModule module,
+                                     Object[] notifArgs, List<?> originalArr,
+                                     ArrayList<Object> kept) {
+        try {
+            if (chatActivity == null) return;
+            Integer guidObj = (Integer) notifArgs[10];
+            boolean isEnd = Boolean.TRUE.equals(notifArgs[9]);
+
+            if (kept.size() >= CASCADE_MIN_ROWS) {
+                cascadeCount.remove(guidObj); // 内容健康，重置计数
+                return;
+            }
+            if (isEnd) return; // 历史已到底，确实没有达标消息
+
+            int oldestId = oldestPositiveMessageId(originalArr);
+            if (oldestId <= 0) return;
+
+            int guid = guidObj;
+            int n = cascadeCount.merge(guid, 1, Integer::sum);
+            if (cascadeCount.size() > 100) cascadeCount.clear(); // 防泄漏
+            if (n > CASCADE_MAX_BATCHES) {
+                if (n == CASCADE_MAX_BATCHES + 1) {
+                    module.log(Log.WARN, TAG, "Cascade cap reached (" + CASCADE_MAX_BATCHES
+                            + " batches) for dialog=" + notifArgs[0] + ", giving up");
+                }
+                return;
+            }
+
+            long dialogId = (Long) notifArgs[0];
+            int mode = (Integer) notifArgs[14];
+            module.log(Log.INFO, TAG, "Cascade #" + n + ": only " + kept.size()
+                    + " rows survived, auto-loading " + CASCADE_BATCH_SIZE
+                    + " older messages (dialog=" + dialogId + ", older<" + oldestId + ")");
+
+            // post 到主线程末尾执行，避免在 NotificationCenter 派发循环内重入
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
+                    triggerCascadeLoad(chatActivity, module, dialogId, oldestId, mode));
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "maybeCascade error: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 反射调用 MessagesController.loadMessages 请求更早历史。
+     * 参数镜像 ChatActivity 自身的滚动加载调用（load_type=0 向更早方向）。
+     */
+    private static void triggerCascadeLoad(Object chatActivity, XposedModule module,
+                                           long dialogId, int oldestId, int mode) {
+        try {
+            Class<?> caClass = chatActivity.getClass();
+            long mergeDialogId = getLongFieldValue(caClass, chatActivity, "mergeDialogId");
+            int classGuid = getIntFieldValue(caClass, chatActivity, "classGuid");
+            long threadMessageId = getLongFieldValue(caClass, chatActivity, "threadMessageId");
+            int replyMaxReadId = getIntFieldValue(caClass, chatActivity, "replyMaxReadId");
+            boolean isTopic = getBooleanFieldValue(caClass, chatActivity, "isTopic");
+            int currentAccount = getIntFieldValue(caClass, chatActivity, "currentAccount");
+
+            // lastLoadIndex：读值 → 登记 waitingForLoad → 传值 → 回写+1（与 TG 自身一致）
+            Field loadIndexField = findFieldInHierarchy(caClass, "lastLoadIndex");
+            if (loadIndexField == null) return;
+            loadIndexField.setAccessible(true);
+            int loadIndex = loadIndexField.getInt(chatActivity);
+
+            Field waitingField = findFieldInHierarchy(caClass, "waitingForLoad");
+            if (waitingField != null) {
+                Object waitingList = waitingField.get(chatActivity);
+                if (waitingList instanceof List) {
+                    @SuppressWarnings("unchecked")
+                    List<Object> list = (List<Object>) waitingList;
+                    list.add(loadIndex);
+                }
+            }
+            loadIndexField.setInt(chatActivity, loadIndex + 1);
+
+            ClassLoader cl = caClass.getClassLoader();
+            Class<?> mcClass = cl.loadClass("org.telegram.messenger.MessagesController");
+            Object mc = mcClass.getMethod("getInstance", int.class).invoke(null, currentAccount);
+            Method load = mcClass.getMethod("loadMessages",
+                    long.class, long.class, boolean.class, int.class, int.class, int.class,
+                    boolean.class, int.class, int.class, int.class, int.class, int.class,
+                    long.class, int.class, int.class, boolean.class);
+            load.invoke(mc, dialogId, mergeDialogId, false, CASCADE_BATCH_SIZE, oldestId,
+                    0, true, 0, classGuid, 0, 0, mode, threadMessageId, replyMaxReadId,
+                    loadIndex, isTopic);
+
+            module.log(Log.INFO, TAG, "Cascade load ok: count=" + CASCADE_BATCH_SIZE
+                    + " older<" + oldestId + " loadIndex=" + loadIndex);
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "Cascade load failed: " + t.getMessage());
+        }
+    }
+
+    /** 批次中最小的正消息 id（跳过日期对象 id=0 与赞助消息负 id），作为加载更早历史的锚点 */
+    private static int oldestPositiveMessageId(List<?> arr) {
+        int min = 0;
+        for (Object obj : arr) {
+            try {
+                Object owner = fMessageOwner.get(obj);
+                if (owner == null || fTlMessageId == null) continue;
+                int id = fTlMessageId.getInt(owner);
+                if (id > 0 && (min == 0 || id < min)) min = id;
+            } catch (Throwable ignored) {}
+        }
+        return min;
+    }
+
+    /** 沿继承链查找字段（ChatActivity 大量字段声明在自身/父类 BaseFragment 上） */
+    private static Field findFieldInHierarchy(Class<?> clazz, String name) {
+        Class<?> c = clazz;
+        while (c != null && c != Object.class) {
+            try {
+                return c.getDeclaredField(name);
+            } catch (NoSuchFieldException e) {
+                c = c.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    private static long getLongFieldValue(Class<?> clazz, Object obj, String name) {
+        try {
+            Field f = findFieldInHierarchy(clazz, name);
+            if (f != null) { f.setAccessible(true); return f.getLong(obj); }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static int getIntFieldValue(Class<?> clazz, Object obj, String name) {
+        try {
+            Field f = findFieldInHierarchy(clazz, name);
+            if (f != null) { f.setAccessible(true); return f.getInt(obj); }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
+    private static boolean getBooleanFieldValue(Class<?> clazz, Object obj, String name) {
+        try {
+            Field f = findFieldInHierarchy(clazz, name);
+            if (f != null) { f.setAccessible(true); return f.getBoolean(obj); }
+        } catch (Throwable ignored) {}
+        return false;
     }
 
     // ═══════════════════════════════════════════════════
