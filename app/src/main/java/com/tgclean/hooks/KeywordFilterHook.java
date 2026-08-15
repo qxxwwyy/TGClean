@@ -161,33 +161,37 @@ public class KeywordFilterHook {
 
                             Object chatActivity = chain.getThisObject();
 
-                            // guid 门控：messagesDidLoad 会投递给所有同频道的 ChatActivity
-                            // 实例（TG 在 handler 内部才校验 classGuid 并忽略非本实例的批次）。
-                            // 我们的过滤/锚点/级联若对"不处理该批次的实例"也执行，多个实例
-                            // 会各自发起请求流、锚点互相污染（v25 实测：锚点在两个值间振荡、
-                            // 一个批次触发多次级联）。此处只处理属于本实例（或 guid=0 广播）的批次。
+                            // guid 门控（与 TG handler 内部语义严格一致：guid != classGuid 即忽略）：
+                            // messagesDidLoad 投递给所有同频道实例，非本实例的批次不过滤、
+                            // 不动锚点、不级联，避免多实例请求流交叉污染。
+                            // 用标志位而非提前 return，保证 proceed 只在 try 外执行一次。
+                            boolean owner = true;
                             Integer reqGuid = (Integer) notifArgs[10];
-                            if (reqGuid != null && reqGuid != 0) {
+                            if (reqGuid != null) {
                                 int instanceGuid = getIntFieldValue(
                                         chatActivity.getClass(), chatActivity, "classGuid");
-                                if (instanceGuid != reqGuid) {
-                                    return chain.proceed();
-                                }
+                                owner = instanceGuid == reqGuid;
                             }
 
-                            List<?> arr = (List<?>) notifArgs[2];
-                            ArrayList<Object> kept = filterBatch(arr, engine, module);
-                            if (kept.size() != arr.size()) {
-                                newNotifArgs = notifArgs.clone();
-                                // count 必须与数组同步缩减：TG 用 size!=count 判断历史是否到底
-                                newNotifArgs[1] = kept.size();
-                                newNotifArgs[2] = kept;
+                            if (owner) {
+                                List<?> arr = (List<?>) notifArgs[2];
+                                ArrayList<Object> kept = filterBatch(arr, engine, module);
+                                if (kept.size() != arr.size()) {
+                                    newNotifArgs = notifArgs.clone();
+                                    // count 必须与数组同步缩减：TG 用 size!=count 判断历史是否到底
+                                    newNotifArgs[1] = kept.size();
+                                    newNotifArgs[2] = kept;
 
-                                // 被滤掉的批次同样要推进滚动锚点，否则原生上滑
-                                // 会反复请求同一段已丢弃范围（永远加载不动）
-                                updateScrollAnchors(chatActivity, notifArgs, arr, module);
-                                maybeCascade(chatActivity, module, notifArgs,
-                                        arr, kept);
+                                    // 被滤掉的批次同样要推进滚动锚点，否则原生上滑
+                                    // 会反复请求同一段已丢弃范围（永远加载不动）
+                                    updateScrollAnchors(chatActivity, notifArgs, arr, module);
+                                    maybeCascade(chatActivity, module, notifArgs,
+                                            arr, kept);
+                                } else {
+                                    // 零过滤的健康批次同样重置级联计数（审计 F-6）：
+                                    // 否则混合场景下额度只增不减，最终误判"耗尽"
+                                    resetCascadeIfHealthy(chatActivity, module, arr);
+                                }
                             }
                         }
                     }
@@ -240,6 +244,33 @@ public class KeywordFilterHook {
     /** classGuid → 上次级联锚点（无推进的重复批次不消耗上限额度） */
     private static final ConcurrentHashMap<Integer, Integer> lastCascadeAnchor =
             new ConcurrentHashMap<>();
+    /** classGuid → 连续"锚点未推进"级联发起次数（防病理性循环） */
+    private static final ConcurrentHashMap<Integer, Integer> stuckFireCount =
+            new ConcurrentHashMap<>();
+    /** 连续无推进的级联发起上限 */
+    private static final int STUCK_FIRE_LIMIT = 10;
+
+    /** 零过滤的健康批次：真实行数充足时重置级联计数（与 maybeCascade 内的健康分支同语义） */
+    private static void resetCascadeIfHealthy(Object chatActivity, XposedModule module,
+                                               List<?> arr) {
+        try {
+            int realRows = 0;
+            for (Object obj : arr) {
+                if (fIsDateObject == null || !fIsDateObject.getBoolean(obj)) realRows++;
+            }
+            if (realRows >= CASCADE_MIN_ROWS && chatActivity != null) {
+                Integer guidObj = null;
+                try {
+                    guidObj = getIntFieldValue(chatActivity.getClass(), chatActivity, "classGuid");
+                } catch (Throwable ignored) {}
+                if (guidObj != null && guidObj != 0) {
+                    cascadeCount.remove(guidObj);
+                    lastCascadeAnchor.remove(guidObj);
+                    stuckFireCount.remove(guidObj);
+                }
+            }
+        } catch (Throwable ignored) {}
+    }
 
     private static void maybeCascade(Object chatActivity, XposedModule module,
                                      Object[] notifArgs, List<?> originalArr,
@@ -249,7 +280,7 @@ public class KeywordFilterHook {
             Integer guidObj = (Integer) notifArgs[10];
             boolean isEnd = Boolean.TRUE.equals(notifArgs[9]);
 
-            // 任何新批次到达都意味着上一个在途请求已落地（或与本规则无关），清标记
+            // 任何新批次到达都意味着上一个在途请求大概率已落地，清在途标记
             cascadeInFlight.remove(guidObj);
 
             // 只统计真实消息行：仅剩日期分隔行的视图同样无法滚动
@@ -262,44 +293,68 @@ public class KeywordFilterHook {
             if (realRows >= CASCADE_MIN_ROWS) {
                 cascadeCount.remove(guidObj); // 内容健康，重置计数
                 lastCascadeAnchor.remove(guidObj);
+                stuckFireCount.remove(guidObj);
                 return;
             }
             if (isEnd) return; // 历史已到底，确实没有达标消息
 
-            int oldestId = oldestPositiveMessageId(originalArr);
-            if (oldestId <= 0) return;
+            int batchMin = oldestPositiveMessageId(originalArr);
+            if (batchMin <= 0) return;
 
+            // 下降前沿（frontier）：本实例已到达的最老消息 id，只降不升。
+            // TG 在 messagesByDays 为空时会退化为 max_id=0 反复重取最新窗口
+            // （其批次 min 高于前沿），级联必须始终从前沿继续请求更早历史，
+            // 而不是被 TG 的重复批次带偏回最新端。
             int guid = guidObj;
-            // 锚点无推进 = 重复范围（历史版本多实例交叉的产物）。
-            // 这种批次不消耗上限额度，也不重复发起请求。
-            Integer prevAnchor = lastCascadeAnchor.put(guid, oldestId);
-            if (prevAnchor != null && oldestId >= prevAnchor) {
-                module.log(Log.WARN, TAG, "Cascade anchor not advancing ("
-                        + prevAnchor + " -> " + oldestId + "), skip duplicate range");
-                return;
-            }
-            int n = cascadeCount.merge(guid, 1, Integer::sum);
-            if (cascadeCount.size() > 100) cascadeCount.clear(); // 防泄漏
-            if (n > CASCADE_MAX_BATCHES) {
-                if (n == CASCADE_MAX_BATCHES + 1) {
-                    module.log(Log.WARN, TAG, "Cascade cap reached (" + CASCADE_MAX_BATCHES
-                            + " batches ≈ " + (CASCADE_MAX_BATCHES * CASCADE_BATCH_SIZE)
-                            + " msgs) for dialog=" + notifArgs[0] + ", giving up");
+            Integer prevFrontier = lastCascadeAnchor.put(guid, batchMin);
+            int frontier = Math.min(batchMin, prevFrontier == null ? batchMin : prevFrontier);
+            lastCascadeAnchor.put(guid, frontier);
+            boolean advanced = prevFrontier == null || frontier < prevFrontier;
+
+            int n;
+            if (advanced) {
+                // 前沿推进 = 正常下降链，计入额度
+                n = cascadeCount.merge(guid, 1, Integer::sum);
+                if (cascadeCount.size() > 100) cascadeCount.clear(); // 防泄漏
+                if (n > CASCADE_MAX_BATCHES) {
+                    if (n == CASCADE_MAX_BATCHES + 1) {
+                        module.log(Log.WARN, TAG, "Cascade cap reached ("
+                                + CASCADE_MAX_BATCHES + " batches ≈ "
+                                + (CASCADE_MAX_BATCHES * CASCADE_BATCH_SIZE)
+                                + " msgs) for dialog=" + notifArgs[0] + ", giving up");
+                    }
+                    return;
                 }
-                return;
+                stuckFireCount.remove(guid);
+            } else {
+                // 前沿未推进 = TG 空视图重复批次。仍从前沿发起（继续下降），
+                // 不消耗额度；连续多次无推进则放弃（防病理性循环）。
+                // 额度耗尽后此通道同样关闭（硬上限，审计 N-1）。
+                if (cascadeCount.getOrDefault(guid, 0) > CASCADE_MAX_BATCHES) return;
+                int stuck = stuckFireCount.merge(guid, 1, Integer::sum);
+                if (stuck > STUCK_FIRE_LIMIT) {
+                    if (stuck == STUCK_FIRE_LIMIT + 1) {
+                        module.log(Log.WARN, TAG, "Cascade stuck-fire limit reached ("
+                                + STUCK_FIRE_LIMIT + ") for dialog=" + notifArgs[0]);
+                    }
+                    return;
+                }
+                n = cascadeCount.getOrDefault(guid, 0);
             }
             // 已有在途级联（尚未收到响应批次）时不重复发起
             if (cascadeInFlight.putIfAbsent(guid, Boolean.TRUE) != null) return;
 
             long dialogId = (Long) notifArgs[0];
             int mode = (Integer) notifArgs[14];
-            module.log(Log.INFO, TAG, "Cascade #" + n + ": only " + kept.size()
-                    + " rows survived, auto-loading " + CASCADE_BATCH_SIZE
-                    + " older messages (dialog=" + dialogId + ", older<" + oldestId + ")");
+            module.log(Log.INFO, TAG, "Cascade #" + n + (advanced ? "" : "(stuck)")
+                    + ": only " + realRows + " real rows survived, auto-loading "
+                    + CASCADE_BATCH_SIZE + " older messages (dialog=" + dialogId
+                    + ", older<" + frontier + ")");
 
             // post 到主线程末尾执行，避免在 NotificationCenter 派发循环内重入
+            final int anchor = frontier;
             new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
-                    triggerCascadeLoad(chatActivity, module, dialogId, oldestId, mode));
+                    triggerCascadeLoad(chatActivity, module, dialogId, anchor, mode));
         } catch (Throwable t) {
             module.log(Log.ERROR, TAG, "maybeCascade error: " + t.getMessage());
         }
@@ -347,9 +402,22 @@ public class KeywordFilterHook {
                     long.class, long.class, boolean.class, int.class, int.class, int.class,
                     boolean.class, int.class, int.class, int.class, int.class, int.class,
                     long.class, int.class, int.class, boolean.class);
-            load.invoke(mc, dialogId, mergeDialogId, false, CASCADE_BATCH_SIZE, oldestId,
-                    0, true, 0, classGuid, 0, 0, mode, threadMessageId, replyMaxReadId,
-                    loadIndex, isTopic);
+            try {
+                load.invoke(mc, dialogId, mergeDialogId, false, CASCADE_BATCH_SIZE, oldestId,
+                        0, true, 0, classGuid, 0, 0, mode, threadMessageId, replyMaxReadId,
+                        loadIndex, isTopic);
+            } catch (Throwable t) {
+                // invoke 失败则撤销 waitingForLoad 登记，避免留下永不匹配的 stale token
+                try {
+                    if (waitingField != null) {
+                        Object waitingList = waitingField.get(chatActivity);
+                        if (waitingList instanceof List) {
+                            ((List<?>) waitingList).remove(Integer.valueOf(loadIndex));
+                        }
+                    }
+                } catch (Throwable ignored) {}
+                throw t;
+            }
 
             module.log(Log.INFO, TAG, "Cascade load ok: count=" + CASCADE_BATCH_SIZE
                     + " older<" + oldestId + " loadIndex=" + loadIndex);
@@ -370,8 +438,14 @@ public class KeywordFilterHook {
                                              List<?> originalArr, XposedModule module) {
         try {
             if (chatActivity == null) return;
-            int loadIndex = (Integer) notifArgs[11];
-            if (loadIndex < 0 || loadIndex > 1) return;
+            Class<?> caClass = chatActivity.getClass();
+
+            // ⚠️ 数组下标语义（对照 TG 源码 L20561）：主对话=0，合并对话=1。
+            // args[11] 是单调递增的请求 token（lastLoadIndex++），不是下标 —
+            // 早期版本误用导致锚点推进从第二批起全部失效（子代理审计 F-2）。
+            long batchDialogId = (Long) notifArgs[0];
+            long ownDialogId = getLongFieldValue(caClass, chatActivity, "dialog_id");
+            int idx = batchDialogId == ownDialogId ? 0 : 1;
 
             int oldestId = 0;
             int oldestDate = 0;
@@ -389,13 +463,12 @@ public class KeywordFilterHook {
             }
             if (oldestId <= 0) return;
 
-            Class<?> caClass = chatActivity.getClass();
             Field maxField = findFieldInHierarchy(caClass, "maxMessageId");
             if (maxField != null) {
                 maxField.setAccessible(true);
                 int[] ids = (int[]) maxField.get(chatActivity);
-                if (ids != null && loadIndex < ids.length) {
-                    ids[loadIndex] = Math.min(ids[loadIndex], oldestId);
+                if (ids != null && idx < ids.length) {
+                    ids[idx] = Math.min(ids[idx], oldestId);
                 }
             }
             if (oldestDate > 0) {
@@ -403,9 +476,9 @@ public class KeywordFilterHook {
                 if (minDateField != null) {
                     minDateField.setAccessible(true);
                     int[] dates = (int[]) minDateField.get(chatActivity);
-                    if (dates != null && loadIndex < dates.length) {
-                        dates[loadIndex] = dates[loadIndex] == 0
-                                ? oldestDate : Math.min(dates[loadIndex], oldestDate);
+                    if (dates != null && idx < dates.length) {
+                        dates[idx] = dates[idx] == 0
+                                ? oldestDate : Math.min(dates[idx], oldestDate);
                     }
                 }
             }
@@ -479,17 +552,21 @@ public class KeywordFilterHook {
             target.setAccessible(true);
 
             module.hook(target).intercept(chain -> {
+                Object[] newArgs = null;
                 try {
                     List<Object> args = chain.getArgs();
                     if (args.size() == 2 && args.get(0) instanceof List) {
                         List<?> arr = (List<?>) args.get(0);
                         ArrayList<Object> kept = filterBatch(arr, engine, module);
                         if (kept.size() != arr.size()) {
-                            return chain.proceed(new Object[]{kept, args.get(1)});
+                            newArgs = new Object[]{kept, args.get(1)};
                         }
                     }
                 } catch (Throwable t) {
                     module.log(Log.ERROR, TAG, "processNewMessages filter error", t);
+                }
+                if (newArgs != null) {
+                    return chain.proceed(newArgs);
                 }
                 return chain.proceed();
             });
