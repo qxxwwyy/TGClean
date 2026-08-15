@@ -4,7 +4,7 @@
 - **仓库**: https://github.com/qxxwwyy/TGClean
 - **正式版本**: v1.0.0
 - **开发分支**: `feature/in-app-ui`（PR #1）
-- **当前测试版本**: v29（级联控制流重写 + 每频道/全局检索深度配置，versionCode 16 / 1.4.4）
+- **当前测试版本**: v30（僵尸级联链清理 + 检索进度徽标，versionCode 17 / 1.4.5）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
@@ -129,6 +129,8 @@ app/src/main/res/layout/
 - Chromium snap 存根不可用，Playwright 路径含版本号可能过期
 - **级联防重复不能靠"到达批次清在途标记"**（v28→v29 教训）：高阈值整批滤空时 TG 空视图自身会高频重取最新窗口，这些非推进批次若触发发起，重复回包又触发更多发起——130ms 内同锚点 11 个在途请求，stuck 计数被自己的重复回包 10 连击烧断。正确纪律：只有"前沿推进"（= 响应已落地）才发起下一次；非推进批次纯忽略；丢包恢复交给时间看门狗（CASCADE_STALE_MS 重发，预算封顶）
 - **级联锚点不能在健康批次时重置**：重置后 TG 最新窗口重取会以 prev==null 身份重新"推进"，把已扫描范围整段重扫。锚点语义应为"本实例见过的最老消息 id"，单调不升、实例生命周期内不重置
+- **级联链必须在 onFragmentDestroy 清理**（v29→v30 教训）：看门狗 Handler 自续引用会苟过实例销毁，观察者已注销→响应永不推进→每 4.25s 空转重发至预算耗尽；日志实测同频道 10+ 条僵尸链并发 170s，load 风暴拖慢真实级联（"时灵时不灵"的直接诱因）。双保险：hook onFragmentDestroy 清全部 per-guid 状态 + 看门狗 getParentActivity()==null 兜底自检
+- **TG 所有 ChatActivity 共宿主一个 LaunchActivity**：悬浮徽标挂 android.R.id.content 天然全局唯一，前台频道即语义归属者；退出频道不主动撤徽标（防误撤他台），靠 10s 无更新自动消失兜底
 
 ## v16 review 结论（2026-08-14，对照 TG master 12.9.2 + libxposed 101.0.1）
 **修复的 bug**：

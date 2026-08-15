@@ -67,7 +67,8 @@ public class KeywordFilterHook {
     private static volatile Field fTlDialogId;      // TLRPC.Message.dialog_id
     private static volatile Field fTlPeerId;        // TLRPC.Message.peer_id
     private static volatile Field fTlReactions;     // TLRPC.Message.reactions
-    private static volatile Method fGetContext;     // BaseFragment.getContext()（Toast 用）
+    private static volatile Method fGetContext;     // BaseFragment.getContext()（Toast/徽标用）
+    private static volatile Method fGetParentActivity; // BaseFragment.getParentActivity()（僵尸链检测）
     private static volatile boolean fieldsResolved = false;
 
     private static void resolveFields(ClassLoader cl) {
@@ -134,6 +135,7 @@ public class KeywordFilterHook {
 
         hookMessagesDidLoad(cl, module, engine, config);
         hookProcessNewMessages(cl, module, engine);
+        hookFragmentDestroy(cl, module);
     }
 
     // ═══════════════════════════════════════════════════
@@ -267,6 +269,9 @@ public class KeywordFilterHook {
     /** classGuid → 已发过终点提示（到底/额度耗尽只 Toast 一次） */
     private static final Set<Integer> terminalNotified =
             ConcurrentHashMap.newKeySet();
+    /** classGuid → 级联期间累计达标行数（进度徽标显示用） */
+    private static final ConcurrentHashMap<Integer, Integer> cascadeFound =
+            new ConcurrentHashMap<>();
 
     /**
      * 零过滤的健康批次：真实行数充足时重置额度/看门狗/终点提示（与
@@ -291,6 +296,8 @@ public class KeywordFilterHook {
                     cascadeInFlightAt.remove(guidObj);
                     watchdogFires.remove(guidObj);
                     terminalNotified.remove(guidObj);
+                    cascadeFound.remove(guidObj);
+                    removeCascadeBadge(); // 健康批次到达即撤下检索徽标
                 }
             }
         } catch (Throwable ignored) {}
@@ -319,6 +326,8 @@ public class KeywordFilterHook {
                 cascadeInFlightAt.remove(guidObj);
                 watchdogFires.remove(guidObj);
                 terminalNotified.remove(guidObj);
+                cascadeFound.remove(guidObj);
+                removeCascadeBadge();
                 return;
             }
             if (isEnd) { // 历史已到底，确实没有达标消息
@@ -326,6 +335,7 @@ public class KeywordFilterHook {
                 // 否则终点后仍会对同一锚点徒劳重发直至预算耗尽（审计 v29-A1）
                 cascadeInFlightAt.remove(guidObj);
                 watchdogFires.remove(guidObj);
+                removeCascadeBadge();
                 notifyTerminalOnce(guidObj, chatActivity, module, notifArgs,
                         "已筛选至频道开头，未发现达标消息");
                 return;
@@ -362,6 +372,7 @@ public class KeywordFilterHook {
                     ? depthRule.maxDepth : config.getReactionsSearchDepth();
             int maxBatches = Math.max(1, (depth + CASCADE_BATCH_SIZE - 1) / CASCADE_BATCH_SIZE);
             if (n > maxBatches) {
+                removeCascadeBadge();
                 notifyTerminalOnce(guidObj, chatActivity, module, notifArgs,
                         "已连续筛选约" + ReactionsRule.formatDepth(depth)
                                 + "条历史仍未发现达标消息，已停止自动加载（可在⚡表情过滤里调大检索深度）");
@@ -371,6 +382,13 @@ public class KeywordFilterHook {
                 module.log(Log.INFO, TAG, "Cascade progress #" + n + "/" + maxBatches
                         + " (dialog=" + dialogId + ", frontier=" + frontier + ")");
             }
+            // 达标行累计 + 进度徽标：让用户看见"还在搜、搜到哪了"
+            int found = cascadeFound.merge(guid, realRows, Integer::sum);
+            if (cascadeFound.size() > 200) cascadeFound.clear(); // 防泄漏
+            updateCascadeBadge(chatActivity, "🔍 TGClean 检索中 · 已筛约 "
+                    + ReactionsRule.formatDepth(n * CASCADE_BATCH_SIZE) + "/"
+                    + ReactionsRule.formatDepth(maxBatches * CASCADE_BATCH_SIZE)
+                    + (found > 0 ? " · 达标 " + found + " 条" : ""), true);
             fireCascade(chatActivity, module, dialogId, (Integer) notifArgs[14],
                     guid, frontier, n, realRows);
         } catch (Throwable t) {
@@ -405,6 +423,23 @@ public class KeywordFilterHook {
         try {
             Long cur = cascadeInFlightAt.get(guid);
             if (cur == null || cur != myTs) return; // 已被推进响应解除/被新一代取代
+            if (!isFragmentAlive(chatActivity)) {
+                // 实例已销毁（onFragmentDestroy 钩子缺失/失效时的兜底）：
+                // 观察者已注销，响应永远无法推进锚点，立即终止僵尸链
+                clearCascadeState(guid);
+                module.log(Log.INFO, TAG, "Cascade chain dropped (fragment detached)"
+                        + " dialog=" + dialogId);
+                return;
+            }
+            Integer curGuid = getIntFieldValue(chatActivity.getClass(), chatActivity, "classGuid");
+            if (curGuid == null || curGuid != guid) {
+                // 话题切换/resetForReload 会在存活实例上重新生成 classGuid：
+                // 旧 guid 的回包被实例 guid 门拒收（永不推进），按孤儿链清理
+                clearCascadeState(guid);
+                module.log(Log.INFO, TAG, "Cascade chain dropped (guid regenerated)"
+                        + " dialog=" + dialogId);
+                return;
+            }
             Integer anchorObj = oldestSeenAnchor.get(guid);
             if (anchorObj == null || anchorObj <= 0) {
                 // 锚点只会在防泄漏 clear 中被清空（健康重置不清锚点，但会清
@@ -416,6 +451,7 @@ public class KeywordFilterHook {
             int wd = watchdogFires.merge(guid, 1, Integer::sum);
             if (wd > WATCHDOG_MAX_REFIRES) {
                 cascadeInFlightAt.remove(guid);
+                removeCascadeBadge();
                 module.log(Log.WARN, TAG, "Cascade watchdog gave up (no descending response"
                         + " for " + (WATCHDOG_MAX_REFIRES * CASCADE_STALE_MS / 1000)
                         + "s) dialog=" + dialogId);
@@ -426,6 +462,8 @@ public class KeywordFilterHook {
             if (!cascadeInFlightAt.replace(guid, myTs, now)) return;
             module.log(Log.INFO, TAG, "Cascade watchdog refire #" + wd
                     + " (dialog=" + dialogId + ", older<" + anchorObj + ")");
+            updateCascadeBadge(chatActivity, "🔍 TGClean 检索中 · 等待响应，重试 older<"
+                    + anchorObj, true);
             final int anc = anchorObj;
             android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
             h.post(() -> triggerCascadeLoad(chatActivity, module, dialogId, anc, mode));
@@ -436,10 +474,11 @@ public class KeywordFilterHook {
         }
     }
 
-    /** 终点提示（到底/额度耗尽）：日志 + Toast 各一次，用户不再面对沉默的"暂无消息" */
+    /** 终点提示（到底/额度耗尽）：徽标撤下 + 日志 + Toast 各一次，用户不再面对沉默的"暂无消息" */
     private static void notifyTerminalOnce(Integer guid, Object chatActivity,
                                            XposedModule module, Object[] notifArgs,
                                            String message) {
+        removeCascadeBadge();
         if (!terminalNotified.add(guid)) return;
         module.log(Log.WARN, TAG, "Cascade terminal (dialog=" + notifArgs[0] + "): " + message);
         try {
@@ -459,6 +498,142 @@ public class KeywordFilterHook {
                 });
             }
         } catch (Throwable ignored) {}
+    }
+
+    /**
+     * ChatActivity.onFragmentDestroy → 清理本实例全部级联状态。
+     *
+     * v29 教训（v29 实测日志确证）：看门狗链持有 Handler 自续引用，实例销毁
+     * 后 NotificationCenter 观察者已注销、响应永远无法推进锚点，链条却仍每
+     * CASCADE_STALE_MS 重发 loadMessages——同频道积了 10+ 条僵尸链并发空转
+     * 最长 170s（80 次 load / 21 次真实推进），DB/网络请求风暴拖慢后续真实
+     * 级联，是"有时能搜到有时不能"的直接诱因。
+     */
+    private static void hookFragmentDestroy(ClassLoader cl, XposedModule module) {
+        try {
+            Class<?> caClass = cl.loadClass("org.telegram.ui.ChatActivity");
+            Method target = caClass.getDeclaredMethod("onFragmentDestroy");
+            target.setAccessible(true);
+            module.hook(target).intercept(chain -> {
+                chain.proceed();
+                try {
+                    Object chatActivity = chain.getThisObject();
+                    Integer guid = getIntFieldValue(
+                            chatActivity.getClass(), chatActivity, "classGuid");
+                    if (guid != null && guid != 0) {
+                        clearCascadeState(guid);
+                    }
+                } catch (Throwable ignored) {}
+                return null;
+            });
+            module.log(Log.INFO, TAG, "=== Hooked onFragmentDestroy (cascade cleanup) ===");
+        } catch (Throwable t) {
+            // 非致命：看门狗的 getParentActivity 兜底检测仍能终止僵尸链
+            module.log(Log.WARN, TAG,
+                    "onFragmentDestroy hook failed: " + t.getMessage());
+        }
+    }
+
+    /** BaseFragment.getParentActivity() 为 null 即实例已脱离/销毁（TG 自身的存活判定惯例） */
+    private static boolean isFragmentAlive(Object chatActivity) {
+        try {
+            if (fGetParentActivity == null) {
+                fGetParentActivity = chatActivity.getClass().getMethod("getParentActivity");
+            }
+            return fGetParentActivity.invoke(chatActivity) != null;
+        } catch (Throwable t) {
+            return true; // 反射失败按存活处理：宁可不清理也不误杀活链
+        }
+    }
+
+    /** 清掉某实例的全部级联状态（销毁/僵尸/孤儿链共用） */
+    private static void clearCascadeState(Integer guid) {
+        cascadeCount.remove(guid);
+        cascadeInFlightAt.remove(guid);
+        oldestSeenAnchor.remove(guid);
+        watchdogFires.remove(guid);
+        terminalNotified.remove(guid);
+        cascadeFound.remove(guid);
+    }
+
+    // ═══════════════════════════════════════════════════
+    // 检索进度徽标：悬浮在聊天页底部（framework 控件，仅主线程触摸）
+    //
+    // 背景：高阈值深挖时页面长期"暂无消息"，用户无从分辨是卡住了
+    // 还是在后台检索（v29 用户反馈）。徽标实时显示检索进度/达标数/
+    // 网络重试状态，恢复正常或到达终点（Toast 已另行告知）即撤下；
+    // 10s 无更新自动消失兜底（防销毁钩子失效后残留）。
+    // 注：TG 所有 ChatActivity 共宿主一个 LaunchActivity，徽标挂在
+    // android.R.id.content 上天然全局唯一，前台频道即语义归属者。
+    // ═══════════════════════════════════════════════════
+
+    private static android.widget.TextView cascadeBadge;
+    private static android.view.ViewGroup badgeHost;
+    private static Runnable badgeAutoHide;
+
+    private static void updateCascadeBadge(Object chatActivity, String text, boolean autoHide) {
+        try {
+            if (fGetContext == null) {
+                fGetContext = chatActivity.getClass().getMethod("getContext");
+            }
+            Object ctxObj = fGetContext.invoke(chatActivity);
+            if (!(ctxObj instanceof android.app.Activity)) return;
+            android.view.ViewGroup content =
+                    ((android.app.Activity) ctxObj).findViewById(android.R.id.content);
+            if (content == null) return;
+
+            if (cascadeBadge == null || badgeHost != content) {
+                removeCascadeBadge();
+                android.widget.TextView badge = new android.widget.TextView(content.getContext());
+                badge.setTextSize(12);
+                badge.setTextColor(0xFFFFFFFF);
+                float density = content.getResources().getDisplayMetrics().density;
+                int padH = (int) (12 * density + 0.5f);
+                int padV = (int) (6 * density + 0.5f);
+                badge.setPadding(padH, padV, padH, padV);
+                android.graphics.drawable.GradientDrawable bg =
+                        new android.graphics.drawable.GradientDrawable();
+                bg.setColor(0xCC2B2B2B); // 半透明深色，明暗主题下均可读
+                bg.setCornerRadius(16 * density);
+                badge.setBackground(bg);
+                android.widget.FrameLayout.LayoutParams lp =
+                        new android.widget.FrameLayout.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                                android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL);
+                lp.bottomMargin = (int) (48 * density + 0.5f);
+                content.addView(badge, lp);
+                cascadeBadge = badge;
+                badgeHost = content;
+            }
+            cascadeBadge.setText(text);
+            cascadeBadge.setVisibility(android.view.View.VISIBLE);
+            if (badgeAutoHide != null && badgeHost != null) {
+                badgeHost.removeCallbacks(badgeAutoHide);
+            }
+            if (autoHide) {
+                badgeAutoHide = KeywordFilterHook::removeCascadeBadge;
+                badgeHost.postDelayed(badgeAutoHide, 10_000);
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private static void removeCascadeBadge() {
+        try {
+            // 先撤销已排定的自动隐藏，防止陈旧 runnable 误撤后续新徽标（审计 v30-M2）
+            if (badgeHost != null && badgeAutoHide != null) {
+                badgeHost.removeCallbacks(badgeAutoHide);
+            }
+            if (cascadeBadge != null) {
+                android.view.ViewParent p = cascadeBadge.getParent();
+                if (p instanceof android.view.ViewGroup) {
+                    ((android.view.ViewGroup) p).removeView(cascadeBadge);
+                }
+                cascadeBadge = null;
+            }
+        } catch (Throwable ignored) {}
+        badgeHost = null;
+        badgeAutoHide = null;
     }
 
     /**
