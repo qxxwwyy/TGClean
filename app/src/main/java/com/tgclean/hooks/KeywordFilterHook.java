@@ -63,6 +63,7 @@ public class KeywordFilterHook {
     private static volatile Field fIsDateObject;    // MessageObject.isDateObject（日期分隔行）
     private static volatile Field fTlMessage;       // TLRPC.Message.message
     private static volatile Field fTlMessageId;     // TLRPC.Message.id
+    private static volatile Field fTlDate;          // TLRPC.Message.date
     private static volatile Field fTlDialogId;      // TLRPC.Message.dialog_id
     private static volatile Field fTlPeerId;        // TLRPC.Message.peer_id
     private static volatile Field fTlReactions;     // TLRPC.Message.reactions
@@ -89,6 +90,11 @@ public class KeywordFilterHook {
 
                 fTlMessageId = tlMsgClass.getDeclaredField("id");
                 fTlMessageId.setAccessible(true);
+
+                try {
+                    fTlDate = tlMsgClass.getDeclaredField("date");
+                    fTlDate.setAccessible(true);
+                } catch (NoSuchFieldException ignored) {}
 
                 fTlDialogId = tlMsgClass.getDeclaredField("dialog_id");
                 fTlDialogId.setAccessible(true);
@@ -160,7 +166,11 @@ public class KeywordFilterHook {
                                 newNotifArgs[1] = kept.size();
                                 newNotifArgs[2] = kept;
 
-                                maybeCascade(chain.getThisObject(), module, notifArgs,
+                                Object chatActivity = chain.getThisObject();
+                                // 被滤掉的批次同样要推进滚动锚点，否则原生上滑
+                                // 会反复请求同一段已丢弃范围（永远加载不动）
+                                updateScrollAnchors(chatActivity, notifArgs, arr, module);
+                                maybeCascade(chatActivity, module, notifArgs,
                                         arr, kept);
                             }
                         }
@@ -309,6 +319,62 @@ public class KeywordFilterHook {
                     + " older<" + oldestId + " loadIndex=" + loadIndex);
         } catch (Throwable t) {
             module.log(Log.ERROR, TAG, "Cascade load failed: " + t.getMessage());
+        }
+    }
+
+    /**
+     * 推进 TG 原生上滑加载的滚动锚点。
+     *
+     * TG 在 messagesDidLoad 的添加循环里用 min() 更新 maxMessageId/minDate，
+     * 被过滤的消息不进循环 → 锚点停在"最老的存活消息"→ 上滑反复请求同一段
+     * 已被丢弃的范围（表现为转圈后无事发生）。这里把整批（含被滤消息）的
+     * 最老 id/日期计入锚点，使每次上滑都请求真正更早的历史。
+     */
+    private static void updateScrollAnchors(Object chatActivity, Object[] notifArgs,
+                                             List<?> originalArr, XposedModule module) {
+        try {
+            if (chatActivity == null) return;
+            int loadIndex = (Integer) notifArgs[11];
+            if (loadIndex < 0 || loadIndex > 1) return;
+
+            int oldestId = 0;
+            int oldestDate = 0;
+            for (Object obj : originalArr) {
+                try {
+                    Object owner = fMessageOwner.get(obj);
+                    if (owner == null) continue;
+                    int id = fTlMessageId != null ? fTlMessageId.getInt(owner) : 0;
+                    if (id > 0 && (oldestId == 0 || id < oldestId)) oldestId = id;
+                    if (fTlDate != null) {
+                        int date = fTlDate.getInt(owner);
+                        if (date > 0 && (oldestDate == 0 || date < oldestDate)) oldestDate = date;
+                    }
+                } catch (Throwable ignored) {}
+            }
+            if (oldestId <= 0) return;
+
+            Class<?> caClass = chatActivity.getClass();
+            Field maxField = findFieldInHierarchy(caClass, "maxMessageId");
+            if (maxField != null) {
+                maxField.setAccessible(true);
+                int[] ids = (int[]) maxField.get(chatActivity);
+                if (ids != null && loadIndex < ids.length) {
+                    ids[loadIndex] = Math.min(ids[loadIndex], oldestId);
+                }
+            }
+            if (oldestDate > 0) {
+                Field minDateField = findFieldInHierarchy(caClass, "minDate");
+                if (minDateField != null) {
+                    minDateField.setAccessible(true);
+                    int[] dates = (int[]) minDateField.get(chatActivity);
+                    if (dates != null && loadIndex < dates.length) {
+                        dates[loadIndex] = dates[loadIndex] == 0
+                                ? oldestDate : Math.min(dates[loadIndex], oldestDate);
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "updateScrollAnchors error: " + t.getMessage());
         }
     }
 
