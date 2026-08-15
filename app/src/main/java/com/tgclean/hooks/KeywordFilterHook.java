@@ -158,6 +158,23 @@ public class KeywordFilterHook {
                         Object[] notifArgs = (Object[]) args.get(2);
                         if (notifArgs.length > 14 && notifArgs[2] instanceof List
                                 && Integer.valueOf(0).equals(notifArgs[14])) { // MODE_DEFAULT
+
+                            Object chatActivity = chain.getThisObject();
+
+                            // guid 门控：messagesDidLoad 会投递给所有同频道的 ChatActivity
+                            // 实例（TG 在 handler 内部才校验 classGuid 并忽略非本实例的批次）。
+                            // 我们的过滤/锚点/级联若对"不处理该批次的实例"也执行，多个实例
+                            // 会各自发起请求流、锚点互相污染（v25 实测：锚点在两个值间振荡、
+                            // 一个批次触发多次级联）。此处只处理属于本实例（或 guid=0 广播）的批次。
+                            Integer reqGuid = (Integer) notifArgs[10];
+                            if (reqGuid != null && reqGuid != 0) {
+                                int instanceGuid = getIntFieldValue(
+                                        chatActivity.getClass(), chatActivity, "classGuid");
+                                if (instanceGuid != reqGuid) {
+                                    return chain.proceed();
+                                }
+                            }
+
                             List<?> arr = (List<?>) notifArgs[2];
                             ArrayList<Object> kept = filterBatch(arr, engine, module);
                             if (kept.size() != arr.size()) {
@@ -166,7 +183,6 @@ public class KeywordFilterHook {
                                 newNotifArgs[1] = kept.size();
                                 newNotifArgs[2] = kept;
 
-                                Object chatActivity = chain.getThisObject();
                                 // 被滤掉的批次同样要推进滚动锚点，否则原生上滑
                                 // 会反复请求同一段已丢弃范围（永远加载不动）
                                 updateScrollAnchors(chatActivity, notifArgs, arr, module);
@@ -233,7 +249,14 @@ public class KeywordFilterHook {
             // 任何新批次到达都意味着上一个在途请求已落地（或与本规则无关），清标记
             cascadeInFlight.remove(guidObj);
 
-            if (kept.size() >= CASCADE_MIN_ROWS) {
+            // 只统计真实消息行：仅剩日期分隔行的视图同样无法滚动
+            int realRows = 0;
+            for (Object obj : kept) {
+                try {
+                    if (fIsDateObject == null || !fIsDateObject.getBoolean(obj)) realRows++;
+                } catch (Throwable ignored) {}
+            }
+            if (realRows >= CASCADE_MIN_ROWS) {
                 cascadeCount.remove(guidObj); // 内容健康，重置计数
                 return;
             }
