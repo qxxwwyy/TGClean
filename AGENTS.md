@@ -4,7 +4,7 @@
 - **仓库**: https://github.com/qxxwwyy/TGClean
 - **正式版本**: v1.0.0
 - **开发分支**: `feature/in-app-ui`（PR #1）
-- **当前测试版本**: v17（每频道表情过滤 2.0，versionCode 4 / 1.2.0）
+- **当前测试版本**: v18（过滤架构重构，versionCode 5 / 1.2.1）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
@@ -102,7 +102,8 @@ app/src/main/res/layout/
 1. **规则集为核心过滤单元**（v15+），关键词从规则集角度管理，频道变为被动方
 2. **libxposed API 101**（非102，102未发布Maven Central）
 3. **Java**（非Kotlin，参考项目全为Java，CI构建零障碍）
-4. **双阶段过滤**（构造函数标记deleted=true + updateRowsSafe清理remove）— 与 TG 原生删除机制一致（TG 自己删消息也是置 deleted 后从 messages 移除），设计已对照 layer 228+ 源码验证
+4. **消息数组边界过滤**（v18，取代已废弃的双阶段方案）：hook ChatActivity 的 `didReceivedNotification_messagesDidLoad`（全部加载路径，args[1]=count/[2]=ArrayList/[14]=mode，仅 mode=0 过滤）与 `processNewMessages`（实时新消息+赞助），在消息进入 messages 列表前用 `chain.proceed(newArgs)` 剔除。两个方法均为超大方法，R8 不会内联
+   - ⚠️ 已废弃的 v15~v17 双阶段方案（ctor 标记 deleted=true + updateRowsSafe 移除）失效根因：历史加载/重进走 L21414 直接调 `updateRowsInternal()` 绕过 updateRowsSafe；且 deleted=true 会被渲染层消费（L34646 跳过 cell 重绑定）→ 媒体显示但气泡空白的"半隐藏"状态
 5. **component-explicit broadcast** 跨进程通信（绕过 Android 11+ package visibility）
 6. **ChatActivity.onResume** 作为 hook 点（非 onCreateOptionsMenu，Telegram 不使用标准菜单系统）
 7. **频道批量发现**：首次 onResume 反射扫描频道，优先 `getAllDialogs()+DialogObject.isChannel()`（覆盖频道+megagroup），回退 `dialogsChannelsOnly`（仅广播频道）

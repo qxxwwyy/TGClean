@@ -2,10 +2,9 @@ package com.tgclean.hooks;
 
 import android.util.Log;
 
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.Iterator;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -16,23 +15,30 @@ import com.tgclean.filter.KeywordEngine;
 import io.github.libxposed.api.XposedModule;
 
 /**
- * 关键词过滤Hook — 构造函数标记 + Adapter清理 双阶段方案
+ * 关键词/表情过滤Hook — 消息数组边界过滤（v18 重构）
  *
- * 阶段1（检测）：Hook MessageObject 构造函数，关键词匹配时设置 deleted=true
- * 阶段2（清理）：Hook ChatActivityAdapter.updateRowsSafe()，在行数重算前
- *         从 ChatActivity.messages 列表中移除所有 deleted=true 的消息
+ * v17 及之前的方案：构造函数标记 deleted=true + updateRowsSafe 时从 messages 列表移除。
+ * 该方案在 TG 12.9.2 上暴露三处失效路径：
+ * 1. 历史加载（向上翻页/重进恢复位置）走 ChatActivity L21414 直接调用
+ *    updateRowsInternal()，完全绕过 updateRowsSafe → 被标记的消息保留行号
+ * 2. deleted=true 会被 TG 渲染层消费：ChatActivity L34646 对 deleted 消息跳过
+ *    cell 重绑定 → 媒体照常显示但消息气泡空白（图文消息"框内空白"的根因）
+ * 3. 表情白名单模式隐藏量大（多数消息被标记），边界路径暴露概率远高于关键词过滤
  *
- * 这样 rowCount 正确反映过滤后的消息数，零占位。
+ * v18 方案：在消息数组进入 ChatActivity 之前直接剔除，全部入口收敛于两个方法
+ * （均为超大方法，R8 不会内联，按名 hook 稳定）：
+ * - didReceivedNotification_messagesDidLoad(int,int,Object[]) — 全部加载路径
+ *   （首次进入/向上翻历史/跳转/合并对话）。NotificationCenter 参数数组布局：
+ *   [1]=count(int) [2]=ArrayList&lt;MessageObject&gt; [14]=mode(int)
+ * - processNewMessages(ArrayList,boolean) — 实时新消息 + 赞助消息
  *
- * 性能优化：
- * - 同一 MessageObject 实例只评估一次（构造函数委托链上 deleted 标记幂等短路）
- * - 缓存所有反射字段为 static volatile
- * - cachedThis0Field 缓存内部类 this$0 字段
+ * 通过 chain.proceed(newArgs) 传入剔除后的副本，不污染其他观察者共享的原数组。
+ * 行号/未读线/messagesDict 由 TG 按"消息不存在"的语义自洽处理，无需任何清理。
+ * 日期分隔行（isDateObject=true，TG 本地构造）保留，不参与过滤。
  *
- * ⚠️ 不做跨实例去重：同一 TL 消息会被多次构造 MessageObject（通知预览、
- * 会话列表、聊天窗口各一份实例）。若基于 (dialogId, msgId) 去重跳过标记，
- * 用户真正打开频道时构造的实例将漏标记 → 已过滤消息"复活"。
- * 匹配计算基于内存快照，成本可接受，因此每个实例独立评估。
+ * 已知取舍：
+ * - 已在屏消息不追溯（配置变更后重新进入频道生效，与之前版本一致）
+ * - 白名单模式下若某批消息全部不达标则该批全部隐藏，向上翻页继续加载更早消息
  *
  * 日志tag: TGClean-Keyword
  */
@@ -52,16 +58,12 @@ public class KeywordFilterHook {
 
     // ─── 反射字段缓存 ───
     private static volatile Field fMessageOwner;    // MessageObject.messageOwner
-    private static volatile Field fDeletedField;     // MessageObject.deleted
+    private static volatile Field fIsDateObject;    // MessageObject.isDateObject（日期分隔行）
     private static volatile Field fTlMessage;       // TLRPC.Message.message
     private static volatile Field fTlMessageId;     // TLRPC.Message.id
     private static volatile Field fTlDialogId;      // TLRPC.Message.dialog_id
     private static volatile Field fTlPeerId;        // TLRPC.Message.peer_id
     private static volatile Field fTlReactions;     // TLRPC.Message.reactions
-    private static volatile Field fMessagesField;   // ChatActivity.messages (ArrayList)
-    private static volatile Field fMessagesDictField; // ChatActivity.messagesDict
-    private static volatile Field cachedThis0Field; // ChatActivityAdapter.this$0
-    private static volatile Method cachedDictRemoveMethod; // SparseArray.remove(int) — 反射缓存
     private static volatile boolean fieldsResolved = false;
 
     private static void resolveFields(ClassLoader cl) {
@@ -71,13 +73,14 @@ public class KeywordFilterHook {
             try {
                 Class<?> moClass = cl.loadClass("org.telegram.messenger.MessageObject");
                 Class<?> tlMsgClass = cl.loadClass("org.telegram.tgnet.TLRPC$Message");
-                Class<?> caClass = cl.loadClass("org.telegram.ui.ChatActivity");
 
                 fMessageOwner = moClass.getDeclaredField("messageOwner");
                 fMessageOwner.setAccessible(true);
 
-                fDeletedField = moClass.getDeclaredField("deleted");
-                fDeletedField.setAccessible(true);
+                try {
+                    fIsDateObject = moClass.getDeclaredField("isDateObject");
+                    fIsDateObject.setAccessible(true);
+                } catch (NoSuchFieldException ignored) {}
 
                 fTlMessage = tlMsgClass.getDeclaredField("message");
                 fTlMessage.setAccessible(true);
@@ -94,24 +97,6 @@ public class KeywordFilterHook {
                 fTlReactions = tlMsgClass.getDeclaredField("reactions");
                 fTlReactions.setAccessible(true);
 
-                // ChatActivity 字段
-                try {
-                    fMessagesField = caClass.getDeclaredField("messages");
-                    fMessagesField.setAccessible(true);
-                } catch (NoSuchFieldException ignored) {}
-
-                try {
-                    fMessagesDictField = caClass.getDeclaredField("messagesDict");
-                    fMessagesDictField.setAccessible(true);
-                } catch (NoSuchFieldException ignored) {}
-
-                // ChatActivityAdapter.this$0
-                try {
-                    Class<?> adapterClass = cl.loadClass("org.telegram.ui.ChatActivity$ChatActivityAdapter");
-                    cachedThis0Field = adapterClass.getDeclaredField("this$0");
-                    cachedThis0Field.setAccessible(true);
-                } catch (ClassNotFoundException | NoSuchFieldException ignored) {}
-
                 fieldsResolved = true;
             } catch (Throwable t) {
                 // fieldsResolved stays false
@@ -127,215 +112,162 @@ public class KeywordFilterHook {
         module.log(Log.INFO, TAG, "UseRegex: " + config.isUseRegex());
         module.log(Log.INFO, TAG, "GlobalKeywords: " + config.getGlobalKeywords());
         module.log(Log.INFO, TAG, "Whitelist: " + config.getWhitelist());
-        module.log(Log.INFO, TAG, "ChannelRules: " + config.getChannelKeywords());
+        module.log(Log.INFO, TAG, "ReactionsRules: " + config.getReactionsChannelRules());
 
         resolveFields(cl);
-        if (fMessageOwner == null || fDeletedField == null) {
+        if (fMessageOwner == null) {
             module.log(Log.ERROR, TAG, "Critical fields not resolved! Aborting.");
             return;
         }
 
-        // 阶段1：构造函数标记
-        hookMessageObjectConstructors(cl, module, engine);
-
-        // 阶段2：Adapter清理
-        hookAdapterUpdateRows(cl, module);
+        hookMessagesDidLoad(cl, module, engine);
+        hookProcessNewMessages(cl, module, engine);
     }
 
     // ═══════════════════════════════════════════════════
-    // 阶段1：构造函数Hook — 标记 deleted=true
+    // 入口1：didReceivedNotification_messagesDidLoad — 全部加载路径
+    // 签名: private void (int id, int account, Object... args)
     // ═══════════════════════════════════════════════════
 
-    private static void hookMessageObjectConstructors(ClassLoader cl, XposedModule module,
-                                                       KeywordEngine engine) {
+    private static void hookMessagesDidLoad(ClassLoader cl, XposedModule module,
+                                            KeywordEngine engine) {
         try {
-            Class<?> messageObjectClass = cl.loadClass("org.telegram.messenger.MessageObject");
-            Class<?> tlMsgClass = cl.loadClass("org.telegram.tgnet.TLRPC$Message");
+            Class<?> caClass = cl.loadClass("org.telegram.ui.ChatActivity");
+            Method target = caClass.getDeclaredMethod(
+                    "didReceivedNotification_messagesDidLoad",
+                    int.class, int.class, Object[].class);
+            target.setAccessible(true);
 
-            Constructor<?>[] constructors = messageObjectClass.getDeclaredConstructors();
-            module.log(Log.INFO, TAG, "=== Scanning MessageObject constructors ("
-                    + constructors.length + " total) ===");
-
-            int hookedCount = 0;
-            for (Constructor<?> ctor : constructors) {
-                Class<?>[] params = ctor.getParameterTypes();
-                boolean hasTlMessage = false;
-                for (Class<?> p : params) {
-                    if (p == tlMsgClass) {
-                        hasTlMessage = true;
-                        break;
-                    }
-                }
-                if (!hasTlMessage) continue;
-
-                StringBuilder sb = new StringBuilder("FOUND ctor(");
-                for (int i = 0; i < params.length; i++) {
-                    if (i > 0) sb.append(", ");
-                    sb.append(params[i].getSimpleName());
-                }
-                sb.append(")");
-                module.log(Log.INFO, TAG, sb.toString());
-
+            module.hook(target).intercept(chain -> {
                 try {
-                    ctor.setAccessible(true);
-                    module.hook(ctor).intercept(chain -> {
-                        Object result = chain.proceed();
-                        try {
-                            if (!engine.isEnabled()) return result;
-                            Object thisObj = chain.getThisObject();
-                            if (thisObj == null) return result;
-
-                            // 已标记过，跳过（去重）
-                            if (fDeletedField.getBoolean(thisObj)) return result;
-
-                            Object owner = fMessageOwner.get(thisObj);
-                            if (owner == null) return result;
-
-                            // dialogId
-                            long dialogId = 0;
-                            if (fTlDialogId != null) {
-                                dialogId = fTlDialogId.getLong(owner);
-                            }
-                            if (dialogId == 0) {
-                                dialogId = computeDialogId(owner);
-                            }
-
-                            String text = null;
-                            if (fTlMessage != null) {
-                                Object val = fTlMessage.get(owner);
-                                if (val instanceof String) text = (String) val;
-                            }
-
-                            // 表情规则与文本无关（纯媒体消息也参与），由引擎内部区分
-                            Object reactions = null;
-                            if (fTlReactions != null) {
-                                reactions = fTlReactions.get(owner);
-                            }
-
-                            if (engine.shouldFilter(text, dialogId, reactions)) {
-                                fDeletedField.setBoolean(thisObj, true);
-                                // 去重日志：同一 (dialogId, msgId) 只打印一次
-                                int msgId = 0;
-                                if (fTlMessageId != null) {
-                                    msgId = fTlMessageId.getInt(owner);
-                                }
-                                if (msgId != 0 && loggedKeys.add(comboKey(dialogId, msgId))) {
-                                    if (loggedKeys.size() > MAX_LOGGED_KEYS) {
-                                        loggedKeys.clear();
-                                    }
-                                    logFiltered(module, owner);
-                                }
-                            }
-                        } catch (Throwable t) {
-                            // 静默失败
-                        }
-                        return result;
-                    });
-                    hookedCount++;
-                } catch (Throwable t) {
-                    module.log(Log.ERROR, TAG, "Failed to hook ctor: " + t.getMessage());
-                }
-            }
-
-            module.log(Log.INFO, TAG, "=== Phase 1: hooked " + hookedCount + " constructors ===");
-
-        } catch (Throwable t) {
-            module.log(Log.ERROR, TAG, "Failed to hook MessageObject constructors", t);
-        }
-    }
-
-    // ═══════════════════════════════════════════════════
-    // 阶段2：Adapter清理 — 从messages列表移除deleted消息
-    // ═══════════════════════════════════════════════════
-
-    private static void hookAdapterUpdateRows(ClassLoader cl, XposedModule module) {
-        try {
-            // ChatActivityAdapter 是 ChatActivity 的内部类
-            Class<?> adapterClass = cl.loadClass("org.telegram.ui.ChatActivity$ChatActivityAdapter");
-
-            // 查找 updateRowsSafe 方法（它是 public 的）
-            Method targetMethod = null;
-            for (Method m : adapterClass.getDeclaredMethods()) {
-                if ("updateRowsSafe".equals(m.getName())) {
-                    targetMethod = m;
-                    break;
-                }
-            }
-            if (targetMethod == null) {
-                module.log(Log.ERROR, TAG, "updateRowsSafe not found in ChatActivityAdapter");
-                return;
-            }
-
-            targetMethod.setAccessible(true);
-            module.hook(targetMethod).intercept(chain -> {
-                try {
-                    Object adapter = chain.getThisObject();
-
-                    // 使用缓存的 this$0 字段
-                    Object chatActivity = null;
-                    if (cachedThis0Field != null) {
-                        chatActivity = cachedThis0Field.get(adapter);
-                    } else {
-                        Field thisField = adapter.getClass().getDeclaredField("this$0");
-                        thisField.setAccessible(true);
-                        chatActivity = thisField.get(adapter);
-                    }
-
-                    if (chatActivity != null && fMessagesField != null) {
-                        @SuppressWarnings("unchecked")
-                        List<Object> messages = (List<Object>) fMessagesField.get(chatActivity);
-                        if (messages != null && !messages.isEmpty()) {
-                            int removed = 0;
-                            Iterator<Object> it = messages.iterator();
-                            while (it.hasNext()) {
-                                Object msgObj = it.next();
-                                try {
-                                    if (fDeletedField.getBoolean(msgObj)) {
-                                        // 同步清理 messagesDict（SparseArray[]，两份分别对应置顶/普通区）
-                                        if (fMessagesDictField != null) {
-                                            try {
-                                                Object msgOwner = fMessageOwner.get(msgObj);
-                                                if (msgOwner != null && fTlMessageId != null) {
-                                                    int msgId = fTlMessageId.getInt(msgOwner);
-                                                    Object dict = fMessagesDictField.get(chatActivity);
-                                                    if (dict instanceof Object[]) {
-                                                        for (Object d : (Object[]) dict) {
-                                                            if (d != null) {
-                                                                try {
-                                                                    // ⚠️ SparseArray 只有 remove(int)/delete(int)，
-                                                                    // 用 Object.class 必抛 NoSuchMethodException
-                                                                    Method rm = cachedDictRemoveMethod != null
-                                                                            ? cachedDictRemoveMethod
-                                                                            : (cachedDictRemoveMethod = d.getClass().getMethod("remove", int.class));
-                                                                    rm.invoke(d, msgId);
-                                                                } catch (Throwable ignored) {}
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            } catch (Throwable ignored) {}
-                                        }
-                                        it.remove();
-                                        removed++;
-                                    }
-                                } catch (Throwable ignored) {}
-                            }
-                            if (removed > 0) {
-                                module.log(Log.INFO, TAG,
-                                        "Phase 2: removed " + removed + " deleted messages");
+                    List<Object> args = chain.getArgs();
+                    // varargs 直接传数组时 getArgs().get(2) 就是 NotificationCenter 的 Object[]
+                    if (args.size() == 3 && args.get(2) instanceof Object[]) {
+                        Object[] notifArgs = (Object[]) args.get(2);
+                        if (notifArgs.length > 14 && notifArgs[2] instanceof List
+                                && Integer.valueOf(0).equals(notifArgs[14])) { // MODE_DEFAULT
+                            List<?> arr = (List<?>) notifArgs[2];
+                            ArrayList<Object> kept = filterBatch(arr, engine, module);
+                            if (kept.size() != arr.size()) {
+                                Object[] newNotifArgs = notifArgs.clone();
+                                // count 必须与数组同步缩减：TG 用 size!=count 判断历史是否到底
+                                newNotifArgs[1] = kept.size();
+                                newNotifArgs[2] = kept;
+                                return chain.proceed(new Object[]{
+                                        args.get(0), args.get(1), newNotifArgs});
                             }
                         }
                     }
                 } catch (Throwable t) {
-                    module.log(Log.ERROR, TAG, "Phase 2 error", t);
+                    module.log(Log.ERROR, TAG, "messagesDidLoad filter error", t);
                 }
                 return chain.proceed();
             });
 
-            module.log(Log.INFO, TAG, "=== Phase 2: hooked updateRowsSafe ===");
+            module.log(Log.INFO, TAG, "=== Hooked didReceivedNotification_messagesDidLoad ===");
 
         } catch (Throwable t) {
-            module.log(Log.ERROR, TAG, "Failed to hook ChatActivityAdapter", t);
+            module.log(Log.ERROR, TAG,
+                    "FATAL: failed to hook didReceivedNotification_messagesDidLoad — "
+                            + "过滤将完全不生效! " + t.getMessage(), t);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════
+    // 入口2：processNewMessages — 实时新消息 + 赞助消息
+    // 签名: private void (ArrayList<MessageObject> arr, boolean animatedFromBottom)
+    // ═══════════════════════════════════════════════════
+
+    private static void hookProcessNewMessages(ClassLoader cl, XposedModule module,
+                                               KeywordEngine engine) {
+        try {
+            Class<?> caClass = cl.loadClass("org.telegram.ui.ChatActivity");
+            Method target = caClass.getDeclaredMethod(
+                    "processNewMessages", ArrayList.class, boolean.class);
+            target.setAccessible(true);
+
+            module.hook(target).intercept(chain -> {
+                try {
+                    List<Object> args = chain.getArgs();
+                    if (args.size() == 2 && args.get(0) instanceof List) {
+                        List<?> arr = (List<?>) args.get(0);
+                        ArrayList<Object> kept = filterBatch(arr, engine, module);
+                        if (kept.size() != arr.size()) {
+                            return chain.proceed(new Object[]{kept, args.get(1)});
+                        }
+                    }
+                } catch (Throwable t) {
+                    module.log(Log.ERROR, TAG, "processNewMessages filter error", t);
+                }
+                return chain.proceed();
+            });
+
+            module.log(Log.INFO, TAG, "=== Hooked processNewMessages ===");
+
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG,
+                    "FATAL: failed to hook processNewMessages — 实时消息过滤不生效! "
+                            + t.getMessage(), t);
+        }
+    }
+
+    // ═══════════════════════════════════════════════════
+    // 批量过滤与单条评估
+    // ═══════════════════════════════════════════════════
+
+    private static ArrayList<Object> filterBatch(List<?> arr, KeywordEngine engine,
+                                                 XposedModule module) {
+        ArrayList<Object> kept = new ArrayList<>(arr.size());
+        boolean enabled = engine.isEnabled();
+        int dropped = 0;
+        for (Object obj : arr) {
+            if (obj == null || !enabled || !shouldHide(obj, engine)) {
+                kept.add(obj);
+            } else {
+                dropped++;
+                logFiltered(module, obj);
+            }
+        }
+        if (dropped > 0) {
+            module.log(Log.INFO, TAG,
+                    "Batch filtered: dropped " + dropped + "/" + arr.size());
+        }
+        return kept;
+    }
+
+    /** 评估单条消息是否应隐藏（评估失败一律放行） */
+    private static boolean shouldHide(Object messageObject, KeywordEngine engine) {
+        try {
+            // 日期分隔行是 TG 本地构造的 UI 结构，保留
+            if (fIsDateObject != null && fIsDateObject.getBoolean(messageObject)) {
+                return false;
+            }
+            Object owner = fMessageOwner.get(messageObject);
+            if (owner == null) return false;
+
+            long dialogId = 0;
+            if (fTlDialogId != null) {
+                dialogId = fTlDialogId.getLong(owner);
+            }
+            if (dialogId == 0) {
+                dialogId = computeDialogId(owner);
+            }
+            if (dialogId == 0) return false;
+
+            String text = null;
+            if (fTlMessage != null) {
+                Object val = fTlMessage.get(owner);
+                if (val instanceof String) text = (String) val;
+            }
+
+            Object reactions = null;
+            if (fTlReactions != null) {
+                reactions = fTlReactions.get(owner);
+            }
+
+            return engine.shouldFilter(text, dialogId, reactions);
+        } catch (Throwable t) {
+            return false;
         }
     }
 
@@ -384,22 +316,31 @@ public class KeywordFilterHook {
         return 0;
     }
 
-    private static void logFiltered(XposedModule module, Object tlMessage) {
+    private static void logFiltered(XposedModule module, Object messageObject) {
         try {
+            Object owner = fMessageOwner.get(messageObject);
+            if (owner == null) return;
+
             String text = null;
             if (fTlMessage != null) {
-                Object val = fTlMessage.get(tlMessage);
+                Object val = fTlMessage.get(owner);
                 if (val instanceof String) text = (String) val;
             }
 
             int msgId = 0;
             if (fTlMessageId != null) {
-                msgId = fTlMessageId.getInt(tlMessage);
+                msgId = fTlMessageId.getInt(owner);
             }
 
             long dialogId = 0;
             if (fTlDialogId != null) {
-                dialogId = fTlDialogId.getLong(tlMessage);
+                dialogId = fTlDialogId.getLong(owner);
+            }
+
+            // 同一 (dialogId, msgId) 只打印一次（重进频道会重新加载同一批消息）
+            if (msgId != 0 && !loggedKeys.add(comboKey(dialogId, msgId))) return;
+            if (loggedKeys.size() > MAX_LOGGED_KEYS) {
+                loggedKeys.clear();
             }
 
             String preview = text != null && text.length() > 60
