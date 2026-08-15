@@ -1,9 +1,12 @@
 package com.tgclean;
 
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import io.github.libxposed.service.XposedService;
 
@@ -14,32 +17,35 @@ import io.github.libxposed.service.XposedService;
  * 到达时 XposedService binder 可能尚未就绪（进程刚被广播拉起）。
  * 此队列将操作暂存，待 App.onServiceBind 后统一执行。
  *
+ * 自愈重试：执行失败（如 binder 半死状态抛异常）时重新入队并延时重试，
+ * 重试预算 5 次（每次成功后重置），避免单次瞬时故障造成写入永久丢失。
+ *
  * 注意：本类仅在 TGClean App 进程使用；hook 端 remote prefs 只读。
  */
 public final class RemoteConfigStore {
 
     private static final String TAG = "TGClean-ConfigStore";
+    private static final long RETRY_DELAY_MS = 1500;
+    private static final int RETRY_BUDGET = 5;
 
     public interface Op {
         void run(XposedService service) throws Exception;
     }
 
     private static final Queue<Op> pendingOps = new ConcurrentLinkedQueue<>();
+    private static final Handler HANDLER = new Handler(Looper.getMainLooper());
+    private static final AtomicInteger retryBudget = new AtomicInteger(RETRY_BUDGET);
 
     private RemoteConfigStore() {}
 
-    /** 提交写操作：服务就绪立即执行，否则入队等待 */
+    /** 提交写操作：服务就绪立即执行，失败或未就绪则入队等待 */
     public static void submit(Op op) {
         XposedService svc = App.getService();
-        if (svc != null) {
-            try {
-                op.run(svc);
-                return;
-            } catch (Throwable t) {
-                Log.e(TAG, "Op failed, re-queued: " + t.getMessage());
-            }
+        if (svc != null && tryRun(op, svc)) {
+            return;
         }
         pendingOps.add(op);
+        scheduleRetry();
     }
 
     /** 服务就绪时由 App.onServiceBind 调用，清空积压操作；失败项重新入队 */
@@ -47,16 +53,43 @@ public final class RemoteConfigStore {
         int executed = 0;
         Op op;
         while ((op = pendingOps.poll()) != null) {
-            try {
-                op.run(svc);
+            if (tryRun(op, svc)) {
                 executed++;
-            } catch (Throwable t) {
-                Log.e(TAG, "Flush op failed: " + t.getMessage());
+            } else {
                 pendingOps.add(op);
             }
         }
         if (executed > 0) {
             Log.i(TAG, "Flushed " + executed + " pending config ops");
         }
+        if (!pendingOps.isEmpty()) {
+            scheduleRetry();
+        }
+    }
+
+    private static boolean tryRun(Op op, XposedService svc) {
+        try {
+            op.run(svc);
+            retryBudget.set(RETRY_BUDGET);
+            return true;
+        } catch (Throwable t) {
+            Log.e(TAG, "Op failed, re-queued: " + t.getMessage());
+            return false;
+        }
+    }
+
+    private static void scheduleRetry() {
+        if (retryBudget.getAndDecrement() <= 0) {
+            Log.e(TAG, "Retry budget exhausted, " + pendingOps.size() + " ops pending");
+            return;
+        }
+        HANDLER.postDelayed(() -> {
+            XposedService svc = App.getService();
+            if (svc != null) {
+                flush(svc);
+            } else {
+                scheduleRetry();
+            }
+        }, RETRY_DELAY_MS);
     }
 }

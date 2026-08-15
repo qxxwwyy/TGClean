@@ -46,6 +46,8 @@ public class ChatHelperHook {
 
     // 表情过滤规则广播（TG 进程 → TGClean App 进程）
     private static final String ACTION_REACTIONS_RULE = "com.tgclean.ACTION_REACTIONS_RULE";
+    // App 写入成功后的回执（App 进程 → TG 进程）
+    private static final String ACTION_REACTIONS_RULE_SAVED = "com.tgclean.ACTION_REACTIONS_RULE_SAVED";
 
     // BroadcastReceiver 目标
     private static final String TG_CLEAN_PACKAGE = "com.tgclean";
@@ -216,6 +218,7 @@ public class ChatHelperHook {
             // 单个批量广播代替 N 次单发
             Intent intent = new Intent(ACTION);
             intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
+            intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES); // 更新安装后 App stopped 态仍可送达
             intent.putExtra("batch_json", batch.toString());
             context.sendBroadcast(intent);
 
@@ -242,6 +245,7 @@ public class ChatHelperHook {
         try {
             Intent intent = new Intent(ACTION);
             intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
+            intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES); // 更新安装后 App stopped 态仍可送达
             intent.putExtra("dialog_id", dialogId);
             intent.putExtra("name", name != null ? name : String.valueOf(dialogId));
             intent.putExtra("last_seen", now);
@@ -474,10 +478,7 @@ public class ChatHelperHook {
                         : "⚡ 表情过滤（未启用）";
                 titleUpdater.accept(newTitle);
 
-                android.widget.Toast.makeText(context,
-                        enabled ? "已保存，重新进入频道生效" : "已停用本频道表情过滤",
-                        Toast.LENGTH_SHORT).show();
-                module.log(Log.INFO, TAG, "Reactions rule saved: dialog=" + dialogId
+                module.log(Log.INFO, TAG, "Reactions rule save sent: dialog=" + dialogId
                         + " enabled=" + enabled + " whitelist=" + whitelist
                         + " emoji=" + emoji + "≥" + minCount
                         + " emoji2=" + emoji2 + "≤" + maxCount);
@@ -501,13 +502,25 @@ public class ChatHelperHook {
     /**
      * 保存请求经显式广播发给 TGClean App（hook 端 remote prefs 只读），
      * App 端写入后由框架实时推送回来，KeywordEngine 热更新规则快照。
+     *
+     * ⚠️ FLAG_INCLUDE_STOPPED_PACKAGES：更新安装 APK 后 App 处于 stopped 态，
+     * 默认不接收任何广播 → 保存静默丢失（v22 实测：规则卡死在旧值）。
+     * 加此 flag 后系统会拉起 App 进程投递，RemoteConfigStore 排队等 binder。
+     *
+     * 同时注册一次性回执接收器：App 写入成功后回发 ACTION_REACTIONS_RULE_SAVED，
+     * 5 秒未收到则提示用户打开一次 App（写入链路异常时的可见反馈）。
      */
+    private static volatile android.content.BroadcastReceiver pendingConfirmReceiver;
+    private static volatile Runnable pendingConfirmTimeout;
+
     private static void sendReactionsRuleBroadcast(Context context, long dialogId,
                                                    boolean enabled, boolean whitelist,
                                                    String emoji, int minCount,
                                                    String emoji2, int maxCount) {
         Intent intent = new Intent(ACTION_REACTIONS_RULE);
         intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
+        // 关键：允许投递给 stopped 状态的 App（安装/更新后未打开过）
+        intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
         intent.putExtra("dialog_id", dialogId);
         intent.putExtra("enabled", enabled);
         intent.putExtra("whitelist", whitelist);
@@ -515,7 +528,51 @@ public class ChatHelperHook {
         intent.putExtra("min_count", minCount);
         intent.putExtra("emoji2", emoji2 == null ? "" : emoji2);
         intent.putExtra("max_count", maxCount);
+        registerSaveConfirmation(context);
         context.sendBroadcast(intent);
+    }
+
+    /** 注册保存回执（单飞：新保存覆盖旧回执等待） */
+    private static void registerSaveConfirmation(Context context) {
+        // 清理上一轮
+        if (pendingConfirmTimeout != null) {
+            new android.os.Handler(android.os.Looper.getMainLooper())
+                    .removeCallbacks(pendingConfirmTimeout);
+        }
+        if (pendingConfirmReceiver != null) {
+            try { context.unregisterReceiver(pendingConfirmReceiver); } catch (Throwable ignored) {}
+        }
+
+        android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+        final Context appContext = context.getApplicationContext();
+
+        android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
+            @Override
+            public void onReceive(Context ctx, Intent i) {
+                if (pendingConfirmTimeout != null) main.removeCallbacks(pendingConfirmTimeout);
+                try { appContext.unregisterReceiver(this); } catch (Throwable ignored) {}
+                pendingConfirmReceiver = null;
+                Toast.makeText(appContext, "规则已保存并生效", Toast.LENGTH_SHORT).show();
+            }
+        };
+        Runnable timeout = () -> {
+            try { appContext.unregisterReceiver(receiver); } catch (Throwable ignored) {}
+            pendingConfirmReceiver = null;
+            Toast.makeText(appContext,
+                    "保存未确认：请打开一次 TGClean 应用后重试",
+                    Toast.LENGTH_LONG).show();
+        };
+        pendingConfirmReceiver = receiver;
+        pendingConfirmTimeout = timeout;
+
+        android.content.IntentFilter filter =
+                new android.content.IntentFilter(ACTION_REACTIONS_RULE_SAVED);
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            appContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+        } else {
+            appContext.registerReceiver(receiver, filter);
+        }
+        main.postDelayed(timeout, 5000);
     }
 
     private static TextView sectionLabel(Context context, String text) {

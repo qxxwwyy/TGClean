@@ -54,7 +54,7 @@ public class ChannelReceiver extends BroadcastReceiver {
     public void onReceive(Context context, Intent intent) {
         String action = intent.getAction();
         if (ACTION_REACTIONS_RULE.equals(action)) {
-            handleReactionsRule(intent);
+            handleReactionsRule(context, intent);
             return;
         }
         if (!ACTION_CHANNEL_DISCOVERED.equals(action)) return;
@@ -68,11 +68,16 @@ public class ChannelReceiver extends BroadcastReceiver {
         handleSingle(context, intent);
     }
 
+    public static final String ACTION_REACTIONS_RULE_SAVED =
+            "com.tgclean.ACTION_REACTIONS_RULE_SAVED";
+
+    private static final String TG_PACKAGE = "org.telegram.messenger";
+
     /**
      * 表情过滤规则保存：写入 remote prefs（经 RemoteConfigStore，
-     * XposedService 未就绪时排队）。写入后框架会实时推送到 TG 进程。
+     * XposedService 未就绪时排队）。写入成功后向 TG 进程回发确认广播。
      */
-    private void handleReactionsRule(Intent intent) {
+    private void handleReactionsRule(Context context, Intent intent) {
         long dialogId = intent.getLongExtra(EXTRA_DIALOG_ID, 0);
         if (dialogId == 0) return;
 
@@ -90,6 +95,11 @@ public class ChannelReceiver extends BroadcastReceiver {
             FilterConfigWriter writer = new FilterConfigWriter(
                     svc.getRemotePreferences(FilterConfigWriter.PREFS_NAME));
             writer.setReactionsRule(dialogId, rule);
+            // 写入落地后回执，TG 侧据此提示真实结果
+            Intent reply = new Intent(ACTION_REACTIONS_RULE_SAVED);
+            reply.setPackage(TG_PACKAGE);
+            reply.putExtra("dialog_id", dialogId);
+            context.sendBroadcast(reply);
         });
         Log.i(TAG, "Reactions rule queued: dialog=" + dialogId
                 + " enabled=" + rule.enabled + " (" + rule.describe() + ")");
