@@ -41,6 +41,20 @@ public class ReactionsRule {
         return emoji2 != null && !emoji2.isEmpty();
     }
 
+    /**
+     * 写通道入口消毒（发布前审计 M-1 附带）：intent extras 可能来自任意
+     * App，钳制异常值——emoji 超长置空、负数计数/深度归零（深度 0 = 跟随默认）。
+     */
+    public void sanitize() {
+        if (emoji == null) emoji = "";
+        if (emoji2 == null) emoji2 = "";
+        if (emoji.codePointCount(0, emoji.length()) > 16) emoji = "";
+        if (emoji2.codePointCount(0, emoji2.length()) > 16) emoji2 = "";
+        if (minCount < 0) minCount = 0;
+        if (maxCount < 0) maxCount = 0;
+        if (maxDepth < 0) maxDepth = 0;
+    }
+
     /** 菜单/徽标用的简短描述，如 "❤️≥10·👎≤20·白" */
     public String describe() {
         if (!enabled || emoji == null || emoji.isEmpty()) return "关";

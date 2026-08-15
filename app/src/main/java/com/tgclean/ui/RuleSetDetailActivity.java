@@ -1,6 +1,5 @@
 package com.tgclean.ui;
 
-import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
@@ -58,8 +57,10 @@ public class RuleSetDetailActivity extends AppCompatActivity {
 
     private String ruleSetId;
     private SharedPreferences remotePrefs = null;
-    private SharedPreferences discoveredPrefs = null;
     private FilterConfigWriter writer = null;
+
+    /** 初始回填抑制：避免 loadData 的 setChecked 触发监听器写回 */
+    private boolean suppressSwitchWrite = false;
 
     // 当前编辑状态
     private FilterConfigWriter.RuleSetData currentRuleSet = null;
@@ -90,8 +91,6 @@ public class RuleSetDetailActivity extends AppCompatActivity {
             finish();
             return;
         }
-
-        discoveredPrefs = getSharedPreferences("discovered_channels", Context.MODE_PRIVATE);
 
         initViews();
         setupListeners();
@@ -158,28 +157,37 @@ public class RuleSetDetailActivity extends AppCompatActivity {
     }
 
     private void setupListeners() {
-        // 启用/禁用 — 实时保存
+        // 启用/禁用 — 实时保存；服务未就绪时明确提示而不是静默失败（UX 复核 P1-4）
         switchEnabled.setOnCheckedChangeListener((btn, checked) -> {
-            if (writer == null || currentRuleSet == null) return;
+            if (suppressSwitchWrite) return;
+            if (writer == null || currentRuleSet == null) {
+                notifyNotReady();
+                return;
+            }
             currentRuleSet.enabled = checked;
             writer.updateRuleSet(currentRuleSet);
         });
 
         // 正则开关 — 实时保存
         switchRegex.setOnCheckedChangeListener((btn, checked) -> {
-            if (writer == null || currentRuleSet == null) return;
+            if (suppressSwitchWrite) return;
+            if (writer == null || currentRuleSet == null) {
+                notifyNotReady();
+                return;
+            }
             currentRuleSet.useRegex = checked;
             writer.updateRuleSet(currentRuleSet);
         });
 
-        // 名称 — 失焦保存
+        // 名称 — 失焦保存；返回键也会走 commitName（UX 复核 P1-5）
         editName.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus && writer != null && currentRuleSet != null) {
-                String newName = editName.getText().toString().trim();
-                if (!newName.isEmpty() && !newName.equals(currentRuleSet.name)) {
-                    currentRuleSet.name = newName;
-                    writer.updateRuleSet(currentRuleSet);
-                }
+            if (!hasFocus) commitName(false);
+        });
+        getOnBackPressedDispatcher().addCallback(this, new androidx.activity.OnBackPressedCallback(true) {
+            @Override public void handleOnBackPressed() {
+                commitName(true); // 焦点仍在输入框也要提交，否则返回丢改动
+                setEnabled(false);
+                finish();
             }
         });
 
@@ -189,6 +197,31 @@ public class RuleSetDetailActivity extends AppCompatActivity {
         // 全选 / 取消全选
         findViewById(R.id.btn_select_all).setOnClickListener(v -> selectAllChannels(true));
         findViewById(R.id.btn_select_none).setOnClickListener(v -> selectAllChannels(false));
+    }
+
+    private void notifyNotReady() {
+        Snackbar.make(findViewById(android.R.id.content),
+                "配置服务未就绪，请稍后重试", Snackbar.LENGTH_LONG).show();
+    }
+
+    /** 提交名称编辑；空名保留原名称并提示。force=true 时无视焦点（返回键路径） */
+    private void commitName(boolean force) {
+        if (writer == null || currentRuleSet == null) return;
+        if (!force && editName.hasFocus()) return;
+        String newName = editName.getText().toString().trim();
+        if (newName.isEmpty()) {
+            editName.setText(currentRuleSet.name);
+            if (force) {
+                Snackbar.make(findViewById(android.R.id.content),
+                        "名称不能为空，已保留原名称", Snackbar.LENGTH_SHORT).show();
+            }
+            return;
+        }
+        if (!newName.equals(currentRuleSet.name)) {
+            currentRuleSet.name = newName;
+            writer.updateRuleSet(currentRuleSet);
+            toolbar.setTitle(newName);
+        }
     }
 
     private void loadData() {
@@ -214,11 +247,13 @@ public class RuleSetDetailActivity extends AppCompatActivity {
         Map<String, Set<Long>> channelMap = writer.getRuleSetChannels();
         currentChannels = new HashSet<>(channelMap.getOrDefault(ruleSetId, new HashSet<>()));
 
-        // 更新UI
+        // 更新UI（抑制回填触发开关监听器的冗余写回）
+        suppressSwitchWrite = true;
         toolbar.setTitle(currentRuleSet.name);
         switchEnabled.setChecked(currentRuleSet.enabled);
         switchRegex.setChecked(currentRuleSet.useRegex);
         editName.setText(currentRuleSet.name);
+        suppressSwitchWrite = false;
 
         refreshKeywords();
         loadAndShowChannels();
@@ -257,7 +292,11 @@ public class RuleSetDetailActivity extends AppCompatActivity {
                     String kw = editKeyword.getText().toString().trim();
                     if (kw.isEmpty()) return;
 
-                    currentRuleSet.keywords.add(kw);
+                    if (!currentRuleSet.keywords.add(kw)) { // Set.add 返回 false = 已存在
+                        Snackbar.make(findViewById(android.R.id.content),
+                                "关键词已存在", Snackbar.LENGTH_SHORT).show();
+                        return;
+                    }
                     writer.updateRuleSet(currentRuleSet);
                     refreshKeywords();
                 })

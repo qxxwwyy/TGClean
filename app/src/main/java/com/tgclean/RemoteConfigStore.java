@@ -4,6 +4,8 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -50,13 +52,21 @@ public final class RemoteConfigStore {
 
     /** 服务就绪时由 App.onServiceBind 调用，清空积压操作；失败项重新入队 */
     public static void flush(XposedService svc) {
-        int executed = 0;
+        // 单趟排水：先取尽再执行，失败项入队后交给延时重试。
+        // ⚠️ 不能在 poll 循环里失败即 add 回同一队列——binder 半死时
+        // poll→add→poll 同一项无限循环，挂死调用线程（App 主线程 ANR，
+        // 发布前审计 P0-1，等价结构实验证实百万次不退出）
+        List<Op> drained = new ArrayList<>();
         Op op;
         while ((op = pendingOps.poll()) != null) {
-            if (tryRun(op, svc)) {
+            drained.add(op);
+        }
+        int executed = 0;
+        for (Op o : drained) {
+            if (tryRun(o, svc)) {
                 executed++;
             } else {
-                pendingOps.add(op);
+                pendingOps.add(o);
             }
         }
         if (executed > 0) {

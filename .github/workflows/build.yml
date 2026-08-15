@@ -25,8 +25,20 @@ jobs:
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
-      - name: Upload APK
+      # R8 minify + shrinkResources + 签名路径与正式发布完全一致，逐次验证
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
+
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: TGClean-debug
           path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TGClean-release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

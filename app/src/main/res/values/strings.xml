@@ -3,37 +3,12 @@
     <string name="app_name">TGClean</string>
     <string name="app_description">Telegram keyword ad filter with per-channel rules</string>
 
-    <!-- 通用 -->
-    <string name="save_config">保存配置</string>
-    <string name="config_saved">配置已保存，新消息即时生效（已在屏消息需重新进入聊天）</string>
-    <string name="save_hint">配置变更实时推送到 Telegram，无需重启</string>
-
     <!-- 总开关 -->
     <string name="filter_enabled">启用过滤</string>
-    <string name="filter_enabled_desc">关闭后所有过滤功能将停止工作</string>
+    <string name="filter_enabled_desc">关闭后所有过滤功能将停止工作（拨动即生效，无需保存）</string>
 
-    <!-- 关键词区段 -->
-    <string name="section_keywords">关键词过滤</string>
-    <string name="use_regex">正则表达式模式</string>
-    <string name="global_keywords_hint">输入关键词</string>
-    <string name="global_keywords_helper">每行一个关键词，匹配到的消息将被隐藏</string>
-
-    <!-- 频道管理 -->
-    <string name="section_channel_management">频道管理</string>
-    <string name="channel_management_desc">在 Telegram 中打开目标频道后会自动出现在此列表中。点击频道可配置专属过滤规则。</string>
-    <string name="add_channel">添加频道</string>
-    <string name="discovered_channels">已发现 0 个频道</string>
-
-    <!-- 白名单 -->
-    <string name="section_whitelist">白名单</string>
-    <string name="whitelist_empty">暂无白名单频道</string>
-    <string name="add_whitelist">添加白名单频道</string>
-
-    <!-- 旧版（隐藏） -->
-    <string name="section_channel_rules">分频道规则</string>
-    <string name="channel_rules_hint">频道规则</string>
-    <string name="channel_rules_helper">格式：频道ID:关键词1,关键词2，每行一条规则</string>
-    <string name="paste_chat_id">从剪贴板导入聊天ID</string>
-    <string name="whitelist_hint">对话 ID</string>
-    <string name="whitelist_helper">白名单内的对话不会被过滤，逗号分隔</string>
+    <!-- LSPosed 服务等待层 -->
+    <string name="waiting_service">正在连接 LSPosed 服务…</string>
+    <string name="waiting_service_timeout">未连接到 LSPosed 服务。请依次检查：\n1. 已安装支持 libxposed API 101 的 LSPosed\n2. 已在 LSPosed 中启用 TGClean 模块\n3. 作用域已勾选 Telegram\n4. 强制重启 Telegram 和 TGClean 后点「重试」</string>
+    <string name="retry">重试</string>
 </resources>

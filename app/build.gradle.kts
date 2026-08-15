@@ -11,17 +11,19 @@ android {
         applicationId = "com.tgclean"
         minSdk = 28
         targetSdk = 36
-        versionCode = 17
-        versionName = "1.4.5"
+        versionCode = 18
+        versionName = "2.0.0"
     }
 
     signingConfigs {
         create("release") {
-            // 使用仓库中的固定keystore，确保每次构建签名一致可覆盖安装
+            // 使用仓库中的固定keystore，确保每次构建签名一致可覆盖安装。
+            // 密码优先取环境变量（CI 注入）；本地构建回退到默认值。
+            val ksPass = System.getenv("TGCLEAN_KS_PASS") ?: "tgclean2026"
             storeFile = file("release.keystore")
-            storePassword = "tgclean2026"
+            storePassword = ksPass
             keyAlias = "tgclean"
-            keyPassword = "tgclean2026"
+            keyPassword = ksPass
         }
     }
 

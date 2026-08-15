@@ -59,7 +59,8 @@ public class WriteConfigActivity extends Activity {
                 + " (" + rule.describe() + ")");
 
         // op 队列按序执行：写入 op 落地并回执 TG 后，收尾 op 立即关闭透明页
-        ChannelReceiver.submitRuleWrite(this, dialogId, rule);
+        ChannelReceiver.submitRuleWrite(this, dialogId, rule,
+                intent.getStringExtra("token"), intent.getStringExtra("nonce"));
         RemoteConfigStore.submit(svc -> handler.post(this::finish));
     }
 }

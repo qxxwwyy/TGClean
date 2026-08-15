@@ -2,9 +2,9 @@
 
 ## 项目状态
 - **仓库**: https://github.com/qxxwwyy/TGClean
-- **正式版本**: v1.0.0
-- **开发分支**: `feature/in-app-ui`（PR #1）
-- **当前测试版本**: v30（僵尸级联链清理 + 检索进度徽标，versionCode 17 / 1.4.5）
+- **正式版本**: v1.0.0、v2.0.0（tag 触发 release.yml，APK 直传 Release）
+- **开发分支**: `feature/in-app-ui`（PR #1，合并进 main 后发布）
+- **当前测试版本**: v2.0.0（三路复核修复：死循环/僵尸链/等待层/即时保存/折叠列表/token 防伪，versionCode 18）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
@@ -112,11 +112,16 @@ app/src/main/res/layout/
 10. **过滤不做跨实例去重**（v16）：同一 TL 消息会多次构造 MessageObject（通知预览/会话列表/聊天窗口），按 (dialogId,msgId) 去重跳过标记会导致打开频道时漏过滤"复活"，每实例独立评估
 11. **每频道表情过滤**（v17，取代旧全局 reactions）：白名单模式只显示达标消息（如 ❤️≥10 且 👎≤20），黑名单模式隐藏达标消息；在 TG 频道菜单直接配置（headerItem 注入 ⚡ 项 + framework AlertDialog 弹窗 + 表情快速选择行），保存经显式广播 → ChannelReceiver → RemoteConfigStore（服务未就绪排队）写 remote prefs → 框架实时推送回 TG 进程热更新；匹配基于 TL_reactionEmoji.emoticon 字符串精确相等，自定义表情(document_id)/付费星星无法匹配
 12. **检索深度两级配置**（v29）：筛选后剩行过少时级联自动向前翻找的消息条数上限。全局默认存 remote prefs `reactions_search_depth`（App 设置页 ⚡表情筛选 卡片，App 端 FilterConfigWriter 写 / hook 端 FilterConfig 读）；每频道覆盖存规则 JSON 字段 `maxDepth`（0=跟随默认，TG 内 ⚡弹窗单选行）。预设 {5千,1万,1.5万,3万,5万}，默认 1.5万；额度=深度/批大小(100) 动态计算。频道启用表情规则且设了深度时，该频道一切级联（含关键词触发的）都按频道深度；无规则/未启用时用全局默认
+13. **写通道配对令牌**（v2.0.0）：App 端 FilterConfigWriter.ensurePairingToken() 首次生成 UUID 写 remote prefs（框架数据目录，第三方不可读）；TG 侧 FilterConfig 只读后随保存广播 `token` extra 带回，写 op 内比对一致才落盘，防任意 App 伪造 intent 改写规则；首次保存（令牌刚生成、推送未达 TG）信任首次。回执另带一次性 `nonce` 防伪，TG 侧菜单标题在回执确认后才更新
+14. **调试日志默认关**（v2.0.0，remote prefs `debug_log`）：FILTERED 逐条明细（含消息预览）、RX-DEBUG、启动关键词 dump 仅在开启时输出，用户通信内容不进 LSPosed 日志；批量摘要始终保留
+15. **无"保存"按钮**（v2.0.0）：全 App 即改即存（remote prefs 实时推送架构下保存是伪概念），总开关拨动即写 + Snackbar 反馈；否则 100+ 频道时按钮沉底要滑很久
+16. **频道列表默认折叠 10 条**（v2.0.0）：超过 10 条显示"显示全部 N 个频道"footer；搜索自动展开、清空恢复折叠；搜索 200ms 防抖 + 数据缓存内存过滤（不重复解析 JSON）
 
 ## 发布规则
 - **只有用户明确说明"正式版本"时才发布 GitHub Release**
 - 其余所有修改：push → CI 构建 → 发 APK 到 Telegram 测试，**不创建 Release**
-- v1.0.0 为当前唯一正式版本，后续版本需用户确认后才可发布
+- 正式发布流程（v2.0.0 起）：feature 分支审计通过 → 合并 PR 进 main → 打 `v*` tag → release.yml 自动构建 release APK 并**原样 .apk 直传** GitHub Release（不打包 zip）；build.yml 在每次 push/PR 同时构建 debug+release 验证 R8 路径
+- 签名 keystore 随仓库公开（个人项目取舍），密码可用环境变量 `TGCLEAN_KS_PASS` 覆盖
 
 ## 已知坑点
 - libxposed API 101 无 `.after()`，void 方法用 `.intercept()` + `return null`

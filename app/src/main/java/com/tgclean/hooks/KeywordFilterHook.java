@@ -120,8 +120,11 @@ public class KeywordFilterHook {
         module.log(Log.INFO, TAG, "=== Filter Config Status ===");
         module.log(Log.INFO, TAG, "Enabled: " + config.isEnabled());
         module.log(Log.INFO, TAG, "UseRegex: " + config.isUseRegex());
-        module.log(Log.INFO, TAG, "GlobalKeywords: " + config.getGlobalKeywords());
-        module.log(Log.INFO, TAG, "Whitelist: " + config.getWhitelist());
+        // 关键词/白名单可能含隐私内容，仅调试日志开启时输出（发布前审计 M-3）
+        if (config.isDebugLog()) {
+            module.log(Log.INFO, TAG, "GlobalKeywords: " + config.getGlobalKeywords());
+            module.log(Log.INFO, TAG, "Whitelist: " + config.getWhitelist());
+        }
         for (Map.Entry<Long, ReactionsRule> e : config.getReactionsChannelRules().entrySet()) {
             module.log(Log.INFO, TAG, "RX-INIT rule dialog=" + e.getKey()
                     + " [" + e.getValue().describeWithCodepoints() + "]");
@@ -134,7 +137,7 @@ public class KeywordFilterHook {
         }
 
         hookMessagesDidLoad(cl, module, engine, config);
-        hookProcessNewMessages(cl, module, engine);
+        hookProcessNewMessages(cl, module, engine, config);
         hookFragmentDestroy(cl, module);
     }
 
@@ -178,7 +181,8 @@ public class KeywordFilterHook {
 
                             if (owner) {
                                 List<?> arr = (List<?>) notifArgs[2];
-                                ArrayList<Object> kept = filterBatch(arr, engine, module);
+                                boolean debugLog = config.isDebugLog();
+                                ArrayList<Object> kept = filterBatch(arr, engine, module, debugLog);
                                 if (kept.size() != arr.size()) {
                                     newNotifArgs = notifArgs.clone();
                                     // count 必须与数组同步缩减：TG 用 size!=count 判断历史是否到底
@@ -375,7 +379,8 @@ public class KeywordFilterHook {
                 removeCascadeBadge();
                 notifyTerminalOnce(guidObj, chatActivity, module, notifArgs,
                         "已连续筛选约" + ReactionsRule.formatDepth(depth)
-                                + "条历史仍未发现达标消息，已停止自动加载（可在⚡表情过滤里调大检索深度）");
+                                + "条历史仍未发现达标消息，已停止自动加载"
+                                + "（深度可在频道内 ⚡表情过滤 或 TGClean App 设置中调大）");
                 return;
             }
             if (n % 10 == 0) {
@@ -405,10 +410,15 @@ public class KeywordFilterHook {
         module.log(Log.INFO, TAG, "Cascade #" + seq + ": only " + realRows
                 + " real rows survived, auto-loading " + CASCADE_BATCH_SIZE
                 + " older messages (dialog=" + dialogId + ", older<" + anchor + ")");
-        // post 到主线程末尾执行，避免在 NotificationCenter 派发循环内重入
+        // post 到主线程末尾执行，避免在 NotificationCenter 派发循环内重入；
+        // 确定性失败（反射签名失效等）由调用方清链，不烧看门狗预算（性能审计 P2-6）
         android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
         final int anc = anchor;
-        h.post(() -> triggerCascadeLoad(chatActivity, module, dialogId, anc, mode));
+        h.post(() -> {
+            if (!triggerCascadeLoad(chatActivity, module, dialogId, anc, mode)) {
+                clearCascadeState(guid);
+            }
+        });
         h.postDelayed(() -> cascadeWatchdog(chatActivity, module, dialogId, mode, guid, now),
                 CASCADE_STALE_MS + 250);
     }
@@ -462,11 +472,14 @@ public class KeywordFilterHook {
             if (!cascadeInFlightAt.replace(guid, myTs, now)) return;
             module.log(Log.INFO, TAG, "Cascade watchdog refire #" + wd
                     + " (dialog=" + dialogId + ", older<" + anchorObj + ")");
-            updateCascadeBadge(chatActivity, "🔍 TGClean 检索中 · 等待响应，重试 older<"
-                    + anchorObj, true);
+            updateCascadeBadge(chatActivity, "🔍 TGClean 检索中 · 网络较慢，正在重试…", true);
             final int anc = anchorObj;
             android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
-            h.post(() -> triggerCascadeLoad(chatActivity, module, dialogId, anc, mode));
+            h.post(() -> {
+                if (!triggerCascadeLoad(chatActivity, module, dialogId, anc, mode)) {
+                    clearCascadeState(guid);
+                }
+            });
             h.postDelayed(() -> cascadeWatchdog(chatActivity, module, dialogId, mode, guid, now),
                     CASCADE_STALE_MS + 250);
         } catch (Throwable t) {
@@ -639,9 +652,12 @@ public class KeywordFilterHook {
     /**
      * 反射调用 MessagesController.loadMessages 请求更早历史。
      * 参数镜像 ChatActivity 自身的滚动加载调用（load_type=0 向更早方向）。
+     *
+     * @return true=已成功发起请求；false=确定性失败（反射签名失效等），
+     *         调用方应立即清链而不是烧看门狗预算重试 40 次（性能审计 P2-6）
      */
-    private static void triggerCascadeLoad(Object chatActivity, XposedModule module,
-                                           long dialogId, int oldestId, int mode) {
+    private static boolean triggerCascadeLoad(Object chatActivity, XposedModule module,
+                                              long dialogId, int oldestId, int mode) {
         try {
             Class<?> caClass = chatActivity.getClass();
             long mergeDialogId = getLongFieldValue(caClass, chatActivity, "mergeDialogId");
@@ -653,7 +669,7 @@ public class KeywordFilterHook {
 
             // lastLoadIndex：读值 → 登记 waitingForLoad → 传值 → 回写+1（与 TG 自身一致）
             Field loadIndexField = findFieldInHierarchy(caClass, "lastLoadIndex");
-            if (loadIndexField == null) return;
+            if (loadIndexField == null) return false;
             loadIndexField.setAccessible(true);
             int loadIndex = loadIndexField.getInt(chatActivity);
 
@@ -697,8 +713,10 @@ public class KeywordFilterHook {
 
             module.log(Log.INFO, TAG, "Cascade load ok: count=" + CASCADE_BATCH_SIZE
                     + " older<" + oldestId + " loadIndex=" + loadIndex);
+            return true;
         } catch (Throwable t) {
             module.log(Log.ERROR, TAG, "Cascade load failed: " + t.getMessage());
+            return false;
         }
     }
 
@@ -820,7 +838,7 @@ public class KeywordFilterHook {
     // ═══════════════════════════════════════════════════
 
     private static void hookProcessNewMessages(ClassLoader cl, XposedModule module,
-                                               KeywordEngine engine) {
+                                               KeywordEngine engine, FilterConfig config) {
         try {
             Class<?> caClass = cl.loadClass("org.telegram.ui.ChatActivity");
             Method target = caClass.getDeclaredMethod(
@@ -833,7 +851,7 @@ public class KeywordFilterHook {
                     List<Object> args = chain.getArgs();
                     if (args.size() == 2 && args.get(0) instanceof List) {
                         List<?> arr = (List<?>) args.get(0);
-                        ArrayList<Object> kept = filterBatch(arr, engine, module);
+                        ArrayList<Object> kept = filterBatch(arr, engine, module, config.isDebugLog());
                         if (kept.size() != arr.size()) {
                             newArgs = new Object[]{kept, args.get(1)};
                         }
@@ -861,16 +879,17 @@ public class KeywordFilterHook {
     // ═══════════════════════════════════════════════════
 
     private static ArrayList<Object> filterBatch(List<?> arr, KeywordEngine engine,
-                                                 XposedModule module) {
+                                                 XposedModule module, boolean debugLog) {
         ArrayList<Object> kept = new ArrayList<>(arr.size());
         boolean enabled = engine.isEnabled();
         int dropped = 0;
         for (Object obj : arr) {
-            if (obj == null || !enabled || !shouldHide(obj, engine, module)) {
+            if (obj == null || !enabled || !shouldHide(obj, engine, module, debugLog)) {
                 kept.add(obj);
             } else {
                 dropped++;
-                logFiltered(module, obj);
+                // 逐条明细含用户消息内容，仅调试日志开启时输出（发布前审计 M-3）
+                if (debugLog) logFiltered(module, obj);
             }
         }
         if (dropped > 0) {
@@ -883,10 +902,12 @@ public class KeywordFilterHook {
     /** RX-DEBUG 调试预算：防止滚动加载时刷屏，进程内最多打印 40 条明细 */
     private static final java.util.concurrent.atomic.AtomicInteger rxDebugBudget =
             new java.util.concurrent.atomic.AtomicInteger(40);
+    /** 预算耗尽后短路整个 debug 块，避免每条消息仍做原子递减（性能审计 P2-3a） */
+    private static volatile boolean rxDebugDone;
 
     /** 评估单条消息是否应隐藏（评估失败一律放行） */
     private static boolean shouldHide(Object messageObject, KeywordEngine engine,
-                                      XposedModule module) {
+                                      XposedModule module, boolean debugLog) {
         try {
             // 日期分隔行是 TG 本地构造的 UI 结构，保留
             if (fIsDateObject != null && fIsDateObject.getBoolean(messageObject)) {
@@ -917,20 +938,24 @@ public class KeywordFilterHook {
 
             boolean hide = engine.shouldFilter(text, dialogId, reactions);
 
-            // 表情规则激活时输出调试明细（限量），用于定位计数读取/表情匹配问题
-            ReactionsRule rule = engine.getActiveRule(dialogId);
-            if (rule != null) {
-                int budget = rxDebugBudget.getAndDecrement();
-                if (budget > 0) {
-                    int msgId = fTlMessageId != null ? fTlMessageId.getInt(owner) : 0;
-                    module.log(Log.INFO, TAG, "RX-DEBUG dialog=" + dialogId
-                            + " msg#" + msgId
-                            + " rule=[" + rule.describeWithCodepoints() + "]"
-                            + " " + KeywordEngine.debugReactions(reactions)
-                            + " => hide=" + hide);
-                } else if (budget == 0) {
-                    module.log(Log.INFO, TAG,
-                            "RX-DEBUG budget exhausted, further detail suppressed");
+            // 表情规则激活时输出调试明细（限量），用于定位计数读取/表情匹配问题；
+            // 仅调试日志开启时（发布版默认关，不暴露用户内容）
+            if (debugLog && !rxDebugDone) {
+                ReactionsRule rule = engine.getActiveRule(dialogId);
+                if (rule != null) {
+                    int budget = rxDebugBudget.getAndDecrement();
+                    if (budget > 0) {
+                        int msgId = fTlMessageId != null ? fTlMessageId.getInt(owner) : 0;
+                        module.log(Log.INFO, TAG, "RX-DEBUG dialog=" + dialogId
+                                + " msg#" + msgId
+                                + " rule=[" + rule.describeWithCodepoints() + "]"
+                                + " " + KeywordEngine.debugReactions(reactions)
+                                + " => hide=" + hide);
+                    } else {
+                        rxDebugDone = true;
+                        module.log(Log.INFO, TAG,
+                                "RX-DEBUG budget exhausted, further detail suppressed");
+                    }
                 }
             }
 

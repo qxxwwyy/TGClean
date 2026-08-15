@@ -111,18 +111,30 @@ public class FilterConfig {
         return parseRuleSetChannelsJson(raw);
     }
 
+    // ═════════════════════════════════════════════
+    // 调试日志 / 写通道配对令牌
+    // ═════════════════════════════════════════════
+
+    private static final String KEY_DEBUG_LOG = "debug_log";
+    private static final String KEY_PAIRING_TOKEN = "pairing_token";
+
     /**
-     * 获取 频道ID → 规则集ID列表 的反向映射（用于UI展示）
+     * 调试日志开关（默认关）。关时逐条消息明细（FILTERED 预览、RX-DEBUG、
+     * 启动配置 dump）不打，仅保留批量摘要——用户通信内容不进 LSPosed 日志。
      */
-    public Map<Long, List<String>> getChannelRuleSetIds() {
-        Map<String, Set<Long>> forward = getRuleSetChannels();
-        Map<Long, List<String>> reverse = new HashMap<>();
-        for (Map.Entry<String, Set<Long>> entry : forward.entrySet()) {
-            for (Long dialogId : entry.getValue()) {
-                reverse.computeIfAbsent(dialogId, k -> new ArrayList<>()).add(entry.getKey());
-            }
-        }
-        return reverse;
+    public boolean isDebugLog() {
+        return prefs.getBoolean(KEY_DEBUG_LOG, false);
+    }
+
+    /**
+     * 写通道配对令牌：App 端首次生成后写入 remote prefs（存于 LSPosed
+     * 框架数据目录，第三方 App 不可读），TG 侧只读后随保存广播带回，
+     * App 端校验一致才落盘——防任意 App 伪造 intent 改写过滤规则。
+     * 空串 = 尚未配对（信任首次）。
+     */
+    public String getPairingToken() {
+        String v = prefs.getString(KEY_PAIRING_TOKEN, "");
+        return v != null ? v : "";
     }
 
     // ═════════════════════════════════════════════
@@ -201,10 +213,6 @@ public class FilterConfig {
         }
 
         return parseWhitelistLegacy(raw);
-    }
-
-    public boolean isWhitelisted(long dialogId) {
-        return getWhitelist().contains(dialogId);
     }
 
     // ═════════════════════════════════════════════

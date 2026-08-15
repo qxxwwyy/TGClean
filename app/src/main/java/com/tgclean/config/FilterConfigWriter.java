@@ -29,12 +29,12 @@ public class FilterConfigWriter {
     public static final String PREFS_NAME = "tgclean_config";
 
     private static final String KEY_ENABLED = "filter_enabled";
-    private static final String KEY_GLOBAL_KEYWORDS = "global_keywords";
     private static final String KEY_USE_REGEX = "use_regex";
     private static final String KEY_CHANNEL_RULES = "channel_rules"; // legacy
-    private static final String KEY_WHITELIST = "whitelist";
     private static final String KEY_REACTIONS_RULES = "reactions_channel_rules";
     private static final String KEY_REACTIONS_DEPTH = "reactions_search_depth";
+    private static final String KEY_DEBUG_LOG = "debug_log";
+    private static final String KEY_PAIRING_TOKEN = "pairing_token";
     // 注：频道发现数据存于 App 本地 prefs（ChannelReceiver 管理），不在本 remote prefs 中
     private static final String KEY_RULE_SETS = "rule_sets";
     private static final String KEY_RULE_SET_CHANNELS = "rule_set_channels";
@@ -265,59 +265,6 @@ public class FilterConfigWriter {
     }
 
     // ═════════════════════════════════════════════
-    // 全局关键词
-    // ═════════════════════════════════════════════
-
-    public void setGlobalKeywords(Set<String> keywords) {
-        prefs.edit().putString(KEY_GLOBAL_KEYWORDS, joinLines(keywords)).apply();
-    }
-
-    private Set<String> getGlobalKeywords() {
-        Set<String> keywords = new HashSet<>();
-        String raw = prefs.getString(KEY_GLOBAL_KEYWORDS, "");
-        if (raw != null && !raw.isEmpty()) {
-            for (String line : raw.split("\n")) {
-                String trimmed = line.trim();
-                if (!trimmed.isEmpty()) keywords.add(trimmed);
-            }
-        }
-        return keywords;
-    }
-
-    // ═════════════════════════════════════════════
-    // 白名单
-    // ═════════════════════════════════════════════
-
-    public Set<Long> getWhitelist() {
-        String raw = prefs.getString(KEY_WHITELIST, "");
-        if (raw == null || raw.isEmpty()) return new HashSet<>();
-        if (raw.trim().startsWith("[")) return parseWhitelistJson(raw);
-        return new HashSet<>();
-    }
-
-    public void setWhitelist(Set<Long> whitelist) {
-        if (whitelist.isEmpty()) {
-            prefs.edit().putString(KEY_WHITELIST, "").apply();
-            return;
-        }
-        JSONArray arr = new JSONArray();
-        for (Long id : whitelist) arr.put(id);
-        prefs.edit().putString(KEY_WHITELIST, arr.toString()).apply();
-    }
-
-    public void addToWhitelist(long dialogId) {
-        Set<Long> wl = getWhitelist();
-        wl.add(dialogId);
-        setWhitelist(wl);
-    }
-
-    public void removeFromWhitelist(long dialogId) {
-        Set<Long> wl = getWhitelist();
-        wl.remove(dialogId);
-        setWhitelist(wl);
-    }
-
-    // ═════════════════════════════════════════════
     // 每频道表情过滤规则
     // ═════════════════════════════════════════════
 
@@ -388,18 +335,38 @@ public class FilterConfigWriter {
     }
 
     // ═════════════════════════════════════════════
-    // 内部工具
+    // 调试日志 / 写通道配对令牌
     // ═════════════════════════════════════════════
 
-    private static String joinLines(Set<String> items) {
-        if (items == null || items.isEmpty()) return "";
-        StringBuilder sb = new StringBuilder();
-        for (String s : items) {
-            if (sb.length() > 0) sb.append('\n');
-            sb.append(s);
-        }
-        return sb.toString();
+    /** 调试日志开关（默认关）：关时 hook 端不打逐条消息明细，保护用户通信内容 */
+    public boolean isDebugLog() {
+        return prefs.getBoolean(KEY_DEBUG_LOG, false);
     }
+
+    public void setDebugLog(boolean enabled) {
+        prefs.edit().putBoolean(KEY_DEBUG_LOG, enabled).apply();
+    }
+
+    /**
+     * 配对令牌：首次调用时生成并写入 remote prefs（框架数据目录，第三方
+     * App 不可读）。TG 侧 hook 只读同一 key，随保存广播带回，App 端比对
+     * 一致才落盘——防任意 App 伪造 intent 改写过滤规则（发布前审计 M-1）。
+     *
+     * @return [令牌, 是否本次新生成]；新生成且对端尚无令牌时按信任首次处理
+     */
+    public Object[] ensurePairingToken() {
+        String existing = prefs.getString(KEY_PAIRING_TOKEN, "");
+        if (existing != null && !existing.isEmpty()) {
+            return new Object[]{existing, false};
+        }
+        String token = java.util.UUID.randomUUID().toString();
+        prefs.edit().putString(KEY_PAIRING_TOKEN, token).apply();
+        return new Object[]{token, true};
+    }
+
+    // ═════════════════════════════════════════════
+    // 内部工具
+    // ═════════════════════════════════════════════
 
     // ─── 解析 ───
 
@@ -443,17 +410,6 @@ public class FilterConfigWriter {
             }
         } catch (JSONException e) {
             Log.e(TAG, "Failed to parse rule set channels", e);
-        }
-        return result;
-    }
-
-    private Set<Long> parseWhitelistJson(String raw) {
-        Set<Long> result = new HashSet<>();
-        try {
-            JSONArray arr = new JSONArray(raw);
-            for (int i = 0; i < arr.length(); i++) result.add(arr.getLong(i));
-        } catch (JSONException e) {
-            Log.e(TAG, "Failed to parse whitelist", e);
         }
         return result;
     }

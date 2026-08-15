@@ -307,7 +307,7 @@ public class KeywordEngine {
                 // 即视为标准 emoji reaction（TL_reactionCustomEmoji 只有 document_id，
                 // 层级查找不到 emoticon，自然跳过）
                 if (reaction == null) continue;
-                Field emoticonField = findFieldInHierarchy(reaction.getClass(), "emoticon");
+                Field emoticonField = cachedField(reaction.getClass(), "emoticon");
                 if (emoticonField == null) continue;
                 Object emoticonObj = emoticonField.get(reaction);
                 if (!(emoticonObj instanceof String)) continue;

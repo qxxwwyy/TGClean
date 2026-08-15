@@ -21,33 +21,45 @@
 
     </com.google.android.material.appbar.AppBarLayout>
 
-    <!-- ═══ XposedService 等待层 ═══ -->
+    <!-- ═══ XposedService 等待层（默认可见；服务就绪前给用户状态与排障指引） ═══ -->
     <FrameLayout
         android:id="@+id/layout_waiting"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:layout_marginTop="?attr/actionBarSize"
-        android:visibility="gone">
+        android:layout_marginTop="?attr/actionBarSize">
 
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_gravity="center"
             android:gravity="center"
-            android:orientation="vertical">
+            android:orientation="vertical"
+            android:padding="32dp">
 
             <com.google.android.material.progressindicator.CircularProgressIndicator
+                android:id="@+id/waiting_indicator"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="16dp"
-                android:indeterminate="true" />
+                android:indeterminate="true"
+                android:layout_marginBottom="16dp" />
 
             <TextView
                 android:id="@+id/text_waiting"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:text="@string/waiting_service"
                 android:textAppearance="?attr/textAppearanceBodyMedium"
                 android:textColor="?attr/colorOnSurfaceVariant" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_waiting_retry"
+                style="?attr/materialButtonTonalStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="@string/retry"
+                android:visibility="gone"
+                app:cornerRadius="12dp" />
 
         </LinearLayout>
 
@@ -129,7 +141,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="默认检索深度：筛选后所剩太少时，自动向前翻找的消息条数上限。频道内 ⚡表情过滤 可单独覆盖"
+                        android:text="筛选后所剩太少时，自动向前翻找的消息条数上限；频道内 ⚡表情过滤 可单独覆盖"
                         android:textAppearance="?attr/textAppearanceBodySmall"
                         android:textColor="?attr/colorOnSurfaceVariant"
                         android:layout_marginBottom="4dp" />
@@ -138,9 +150,11 @@
                         android:id="@+id/row_search_depth"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="默认检索深度：1.5万 条"
+                        android:text="1.5万 条 ›"
                         android:textAppearance="?attr/textAppearanceBodyMedium"
-                        android:paddingVertical="8dp" />
+                        android:minHeight="48dp"
+                        android:gravity="center_vertical"
+                        android:background="?attr/selectableItemBackground" />
 
                 </LinearLayout>
 
@@ -264,9 +278,21 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:inputType="text"
-                            android:maxLines="1" />
+                            android:maxLines="1"
+                            android:imeOptions="actionDone" />
 
                     </com.google.android.material.textfield.TextInputLayout>
+
+                    <TextView
+                        android:id="@+id/text_empty_channels"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="还没有发现频道。打开 Telegram 任意频道后回到本页；若始终为空，请检查 LSPosed 中模块是否启用并勾选 Telegram 作用域，再强制重启 Telegram"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant"
+                        android:gravity="center"
+                        android:paddingVertical="16dp"
+                        android:visibility="gone" />
 
                     <androidx.recyclerview.widget.RecyclerView
                         android:id="@+id/recycler_channels"
@@ -278,24 +304,40 @@
 
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- ═══ 保存按钮 ═══ -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn_save"
-                android:layout_width="match_parent"
-                android:layout_height="48dp"
-                android:text="@string/save_config"
-                android:textSize="15sp"
-                app:cornerRadius="16dp"
-                android:layout_marginBottom="8dp" />
-
-            <TextView
+            <!-- ═══ 调试卡片 ═══ -->
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="@string/save_hint"
-                android:textAlignment="center"
-                android:textAppearance="?attr/textAppearanceBodySmall"
-                android:textColor="?attr/colorOnSurfaceVariant"
-                android:layout_marginBottom="16dp" />
+                android:layout_marginBottom="16dp"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp"
+                app:strokeWidth="1dp"
+                app:strokeColor="?attr/colorOutlineVariant">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <com.google.android.material.materialswitch.MaterialSwitch
+                        android:id="@+id/switch_debug_log"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="调试日志"
+                        android:textAppearance="?attr/textAppearanceTitleMedium" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="开启后在 LSPosed 日志输出逐条过滤明细（含消息内容预览），用于排障；日常使用建议关闭"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant"
+                        android:paddingStart="60dp" />
+
+                </LinearLayout>
+
+            </com.google.android.material.card.MaterialCardView>
 
         </LinearLayout>
 

@@ -63,8 +63,9 @@ public class ChatHelperHook {
     private static volatile long lastReportTime = 0;
     private static final long REPORT_COOLDOWN_MS = 30_000;
 
-    // 首次全量扫描标记（per account）
-    private static volatile boolean scannedAllChannels = false;
+    // 首次全量扫描标记（per account：多账号各自全量扫描一次）
+    private static final java.util.Set<Integer> scannedAccounts =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public static void hook(ClassLoader cl, XposedModule module, FilterConfig config) {
         try {
@@ -97,9 +98,9 @@ public class ChatHelperHook {
                     // ⚠️ 置位必须在扫描成功后才做：冷启动直接恢复聊天页时，
                     // dialogsChannelsOnly 可能还没加载（loadDialogs 晚于首个 onResume），
                     // 无条件置 true 会导致扫描永久跳过。改为成功路径内置位（返回 boolean）。
-                    if (!scannedAllChannels) {
+                    if (!scannedAccounts.contains(accountIdx)) {
                         if (scanAllChannels(context, accountIdx, tgCl, module)) {
-                            scannedAllChannels = true;
+                            scannedAccounts.add(accountIdx);
                         }
                     }
 
@@ -271,13 +272,17 @@ public class ChatHelperHook {
             if (headerItem == null) return;
 
             if (TAG_INJECTED.equals(View.class.cast(headerItem).getTag())) return;
-            View.class.cast(headerItem).setTag(TAG_INJECTED);
 
             Context context = getActivityContext(chatActivity, cl);
             if (context == null) return;
 
             long dialogId = getDialogId(chatActivity, cl);
             if (dialogId == 0) return;
+
+            // 通过全部校验后才打注入标记：早期版本先打标记后校验，
+            // 某次 onResume 恰逢 context/dialogId 暂不可用时该 headerItem
+            // 永久失去注入机会（发布前性能审计 P2-4）
+            View.class.cast(headerItem).setTag(TAG_INJECTED);
 
             int accountIdx = getCurrentAccount(chatActivity, cl);
             String channelName = resolveChannelName(dialogId, accountIdx, cl);
@@ -401,23 +406,21 @@ public class ChatHelperHook {
         root.addView(sectionLabel(context, "检索深度（筛选后剩太少时，自动向前翻找的范围）"));
         int globalDepth = config.getReactionsSearchDepth();
         RadioGroup depthGroup = new RadioGroup(context);
-        depthGroup.setOrientation(RadioGroup.HORIZONTAL);
+        // 纵向排布：横向 6 项在窄屏溢出且不可发现（发布前 UX 复核 P1-7）
+        depthGroup.setOrientation(RadioGroup.VERTICAL);
         RadioButton radioDepthDefault = new RadioButton(context);
-        radioDepthDefault.setText("默认(" + ReactionsRule.formatDepth(globalDepth) + ")");
-        radioDepthDefault.setPadding(0, 0, 0, 0);
+        radioDepthDefault.setText("跟随全局默认（当前 " + ReactionsRule.formatDepth(globalDepth) + " 条）");
         depthGroup.addView(radioDepthDefault);
         final RadioButton[] depthButtons = new RadioButton[ReactionsRule.DEPTH_PRESETS.length];
         for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
             depthButtons[i] = new RadioButton(context);
-            depthButtons[i].setText(ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]));
-            depthButtons[i].setMinWidth(dp(context, 36));
-            depthButtons[i].setPadding(0, 0, dp(context, 4), 0);
+            depthButtons[i].setText(ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]) + " 条");
             depthGroup.addView(depthButtons[i]);
         }
-        root.addView(wrapHScroll(context, depthGroup));
+        root.addView(depthGroup);
 
         TextView hint = new TextView(context);
-        hint.setText("提示：建议用快速选择以确保表情编码匹配；保存后重新进入频道生效");
+        hint.setText("提示：建议用快速选择以确保表情编码匹配（生效时机见保存后的提示）");
         hint.setTextSize(12);
         hint.setPadding(0, dp(context, 10), 0, 0);
         root.addView(hint);
@@ -484,20 +487,25 @@ public class ChatHelperHook {
                 int maxCount = parseIntOr(editMax.getText().toString(), -1);
 
                 if (enabled) {
+                    // 校验失败定位到具体输入框（setError），不再用笼统 Toast（UX 复核 P1-6）
                     if (emoji.isEmpty()) {
-                        android.widget.Toast.makeText(context, "请选择或输入目标表情", Toast.LENGTH_SHORT).show();
+                        editEmoji.setError("请选择或输入目标表情");
+                        editEmoji.requestFocus();
                         return;
                     }
                     if (minCount < 0) {
-                        android.widget.Toast.makeText(context, "请输入有效的数量阈值", Toast.LENGTH_SHORT).show();
+                        editMin.setError("请输入 ≥ 0 的数字");
+                        editMin.requestFocus();
                         return;
                     }
                     if (whitelist && !emoji2.isEmpty() && maxCount < 0) {
-                        android.widget.Toast.makeText(context, "请输入有效的负面表情上限", Toast.LENGTH_SHORT).show();
+                        editMax.setError("请输入 ≥ 0 的数字");
+                        editMax.requestFocus();
                         return;
                     }
                     if (emoji2.equals(emoji)) {
-                        android.widget.Toast.makeText(context, "两个表情不能相同", Toast.LENGTH_SHORT).show();
+                        editEmoji2.setError("两个表情不能相同");
+                        editEmoji2.requestFocus();
                         return;
                     }
                 }
@@ -510,13 +518,19 @@ public class ChatHelperHook {
                     }
                 }
 
-                sendReactionsRuleBroadcast(context, dialogId,
-                        enabled, whitelist, emoji, minCount, emoji2, maxCount, maxDepth);
+                // 令牌随写请求带回 App 端校验（防伪造，审计 M-1）；
+                // nonce 供回执防伪 + 菜单标题在回执确认后才更新（UX 复核 P1-8）
+                String token = config.getPairingToken();
+                String nonce = java.util.UUID.randomUUID().toString();
+                sendReactionsRuleBroadcast(context, dialogId, enabled, whitelist, emoji,
+                        minCount, emoji2, maxCount, maxDepth, token, nonce);
 
-                String newTitle = enabled
+                pendingTitleDialogId = dialogId;
+                pendingTitleNonce = nonce;
+                pendingTitleText = enabled
                         ? "⚡ 表情过滤：" + describeRule(whitelist, emoji, minCount, emoji2, maxCount)
                         : "⚡ 表情过滤（未启用）";
-                titleUpdater.accept(newTitle);
+                pendingTitleUpdater = titleUpdater;
 
                 module.log(Log.INFO, TAG, "Reactions rule save sent: dialog=" + dialogId
                         + " enabled=" + enabled + " whitelist=" + whitelist
@@ -546,15 +560,22 @@ public class ChatHelperHook {
      * 2. 2.5s 无回执 → 透明拉起 App 的 WriteConfigActivity 兜底写入
      *    （MIUI 自启动管理拦截广播拉起进程，但前台应用 startActivity 不受限）
      * 3. 再 6s 无回执 → 提示用户手动打开 App
-     * App 写入成功后回发 ACTION_REACTIONS_RULE_SAVED 回执。
+     * App 写入成功后回发 ACTION_REACTIONS_RULE_SAVED 回执（含 nonce 防伪）。
      */
     private static volatile android.content.BroadcastReceiver pendingConfirmReceiver;
     private static volatile Runnable pendingConfirmTimeout;
+    /** 本次保存的回执 nonce / 目标频道 / 待确认菜单标题（回执确认后才更新） */
+    private static volatile String pendingSaveNonce;
+    private static volatile long pendingTitleDialogId;
+    private static volatile String pendingTitleNonce;
+    private static volatile String pendingTitleText;
+    private static volatile java.util.function.Consumer<String> pendingTitleUpdater;
 
     private static void sendReactionsRuleBroadcast(Context context, long dialogId,
                                                    boolean enabled, boolean whitelist,
                                                    String emoji, int minCount,
-                                                   String emoji2, int maxCount, int maxDepth) {
+                                                   String emoji2, int maxCount, int maxDepth,
+                                                   String token, String nonce) {
         Intent intent = new Intent(ACTION_REACTIONS_RULE);
         intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
         intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
@@ -566,6 +587,9 @@ public class ChatHelperHook {
         intent.putExtra("emoji2", emoji2 == null ? "" : emoji2);
         intent.putExtra("max_count", maxCount);
         intent.putExtra("max_depth", maxDepth); // 0 = 跟随全局默认
+        intent.putExtra("token", token == null ? "" : token);
+        intent.putExtra("nonce", nonce);
+        pendingSaveNonce = nonce;
 
         Context appContext = context.getApplicationContext();
         registerSaveConfirmation(appContext, 2500, () -> {
@@ -577,21 +601,33 @@ public class ChatHelperHook {
                 fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 fallback.putExtras(intent);
                 appContext.startActivity(fallback);
-                registerSaveConfirmation(appContext, 6000, () ->
-                        Toast.makeText(appContext,
-                                "保存未确认：请打开一次 TGClean 应用后重试",
-                                Toast.LENGTH_LONG).show());
+                registerSaveConfirmation(appContext, 6000, () -> {
+                    clearPendingTitle();
+                    Toast.makeText(appContext,
+                            "TGClean：保存未确认，请打开一次 TGClean 应用后重试",
+                            Toast.LENGTH_LONG).show();
+                });
             } catch (Throwable t) {
+                clearPendingTitle();
                 Toast.makeText(appContext,
-                        "保存失败：" + t.getMessage(), Toast.LENGTH_LONG).show();
+                        "TGClean：保存失败，请打开一次 TGClean 应用后重试",
+                        Toast.LENGTH_LONG).show();
             }
         });
         context.sendBroadcast(intent);
     }
 
+    private static void clearPendingTitle() {
+        pendingTitleDialogId = 0;
+        pendingTitleNonce = null;
+        pendingTitleText = null;
+        pendingTitleUpdater = null;
+    }
+
     /**
      * 注册保存回执（单飞：新保存覆盖旧回执等待）。
-     * 收到回执 → 提示已生效；超时 → 执行 onTimeout（兜底链的下一级）。
+     * 收到回执（nonce 匹配）→ 真正确认写入后才更新菜单标题并提示；
+     * 超时 → 执行 onTimeout（兜底链的下一级），标题保持旧值（如实反映未保存）。
      */
     private static void registerSaveConfirmation(Context appContext, long timeoutMs,
                                                  Runnable onTimeout) {
@@ -607,10 +643,25 @@ public class ChatHelperHook {
         android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
             @Override
             public void onReceive(Context ctx, Intent i) {
+                if (pendingConfirmReceiver != this) return; // 旧轮回执迟到，忽略（审计 B-1：匿名类内不可自引用局部变量 receiver）
+                String nonce = i == null ? null : i.getStringExtra("nonce");
+                if (pendingSaveNonce == null || !pendingSaveNonce.equals(nonce)) return; // 回执防伪
                 if (pendingConfirmTimeout != null) main.removeCallbacks(pendingConfirmTimeout);
                 try { appContext.unregisterReceiver(this); } catch (Throwable ignored) {}
                 pendingConfirmReceiver = null;
-                Toast.makeText(appContext, "规则已保存并生效", Toast.LENGTH_SHORT).show();
+                Toast.makeText(appContext, "TGClean：规则已保存，重新进入频道后生效",
+                        Toast.LENGTH_LONG).show();
+                // 写入已确认落地，此刻才更新菜单标题（UX 复核 P1-8）
+                if (pendingTitleUpdater != null && pendingTitleNonce != null
+                        && pendingTitleNonce.equals(nonce)
+                        && i != null && i.getLongExtra("dialog_id", 0) == pendingTitleDialogId) {
+                    java.util.function.Consumer<String> updater = pendingTitleUpdater;
+                    String text = pendingTitleText;
+                    main.post(() -> {
+                        if (updater != null && text != null) updater.accept(text);
+                    });
+                }
+                clearPendingTitle();
             }
         };
         Runnable timeout = () -> {
@@ -703,27 +754,34 @@ public class ChatHelperHook {
         return null;
     }
 
+    private static volatile Method cachedGetName; // DialogObject.getName(int,long)
+
     private static String resolveChannelName(long dialogId, int accountIdx, ClassLoader cl) {
         try {
-            Class<?> dialogObjClass = cl.loadClass("org.telegram.messenger.DialogObject");
-            Method getName = dialogObjClass.getMethod("getName", int.class, long.class);
-            return (String) getName.invoke(null, accountIdx, dialogId);
+            if (cachedGetName == null) {
+                Class<?> dialogObjClass = cl.loadClass("org.telegram.messenger.DialogObject");
+                cachedGetName = dialogObjClass.getMethod("getName", int.class, long.class);
+            }
+            return (String) cachedGetName.invoke(null, accountIdx, dialogId);
         } catch (Throwable t) {
+            cachedGetName = null;
             return String.valueOf(dialogId);
         }
     }
 
     private static void showAndCopyDialogId(Context context, long dialogId, String channelName) {
-        ClipboardManager clipboard = (ClipboardManager)
-                context.getSystemService(Context.CLIPBOARD_SERVICE);
-        ClipData clip = ClipData.newPlainText("TGClean Chat ID", String.valueOf(dialogId));
-        clipboard.setPrimaryClip(clip);
+        try {
+            ClipboardManager clipboard = (ClipboardManager)
+                    context.getSystemService(Context.CLIPBOARD_SERVICE);
+            ClipData clip = ClipData.newPlainText("TGClean Chat ID", String.valueOf(dialogId));
+            clipboard.setPrimaryClip(clip);
+        } catch (Throwable ignored) {}
 
         new android.app.AlertDialog.Builder(context)
                 .setTitle("TGClean")
                 .setMessage("聊天ID已复制到剪贴板：\n" + dialogId
                         + "\n\n频道：" + channelName
-                        + "\n\n打开 TGClean App 粘贴此ID来配置过滤规则")
+                        + "\n\n在 TGClean App 的规则集详情中按名称勾选此频道，即可对该频道应用关键词过滤")
                 .setPositiveButton("确定", null)
                 .show();
     }
@@ -776,12 +834,18 @@ public class ChatHelperHook {
         return 0;
     }
 
+    private static volatile Method cachedGetContext; // BaseFragment.getContext()
+
     private static Context getActivityContext(Object activity, ClassLoader cl) {
         try {
             if (activity instanceof Context) return (Context) activity;
-            Method getContext = findMethod(activity.getClass(), "getContext");
-            if (getContext != null) return (Context) getContext.invoke(activity);
-        } catch (Throwable ignored) {}
+            if (cachedGetContext == null) {
+                cachedGetContext = findMethod(activity.getClass(), "getContext");
+            }
+            return (Context) cachedGetContext.invoke(activity);
+        } catch (Throwable t) {
+            cachedGetContext = null;
+        }
         return null;
     }
 

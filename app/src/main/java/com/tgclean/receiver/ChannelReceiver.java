@@ -76,6 +76,11 @@ public class ChannelReceiver extends BroadcastReceiver {
     /**
      * 表情过滤规则保存：写入 remote prefs（经 RemoteConfigStore，
      * XposedService 未就绪时排队）。写入成功后向 TG 进程回发确认广播。
+     *
+     * 令牌校验在写op内执行（此时 service 必已就绪）：TG 侧 hook 只读
+     * remote prefs 中的 pairing_token 随广播带回，比对一致才落盘，
+     * 防任意 App 伪造 intent 改写过滤规则（发布前审计 M-1）。
+     * 首次保存（令牌刚生成、TG 侧尚未读到推送）信任首次。
      */
     private void handleReactionsRule(Context context, Intent intent) {
         long dialogId = intent.getLongExtra(EXTRA_DIALOG_ID, 0);
@@ -92,24 +97,34 @@ public class ChannelReceiver extends BroadcastReceiver {
         if (rule.emoji == null) rule.emoji = "";
         if (rule.emoji2 == null) rule.emoji2 = "";
 
-        submitRuleWrite(context, dialogId, rule);
-        Log.i(TAG, "Reactions rule queued: dialog=" + dialogId
-                + " enabled=" + rule.enabled + " (" + rule.describe() + ")");
+        submitRuleWrite(context, dialogId, rule,
+                intent.getStringExtra("token"), intent.getStringExtra("nonce"));
     }
 
     /**
      * 规则写入的公共入口（广播通道与 WriteConfigActivity 兜底通道共用）：
-     * 写入落地后向 TG 进程回发确认广播。
+     * 写入落地后向 TG 进程回发确认广播（含回执 nonce）。
      */
-    public static void submitRuleWrite(Context context, long dialogId, ReactionsRule rule) {
+    public static void submitRuleWrite(Context context, long dialogId, ReactionsRule rule,
+                                       String token, String nonce) {
         RemoteConfigStore.submit(svc -> {
             FilterConfigWriter writer = new FilterConfigWriter(
                     svc.getRemotePreferences(FilterConfigWriter.PREFS_NAME));
+            Object[] pair = writer.ensurePairingToken();
+            String stored = (String) pair[0];
+            boolean fresh = (Boolean) pair[1];
+            if (!stored.equals(token != null ? token : "")
+                    && !(fresh && (token == null || token.isEmpty()))) {
+                Log.w(TAG, "Rejected rule write: token mismatch (dialog=" + dialogId + ")");
+                return;
+            }
+            rule.sanitize();
             writer.setReactionsRule(dialogId, rule);
             // 写入落地后回执，TG 侧据此提示真实结果
             Intent reply = new Intent(ACTION_REACTIONS_RULE_SAVED);
             reply.setPackage(TG_PACKAGE);
             reply.putExtra("dialog_id", dialogId);
+            if (nonce != null) reply.putExtra("nonce", nonce);
             context.sendBroadcast(reply);
         });
     }
