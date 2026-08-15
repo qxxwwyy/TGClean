@@ -233,17 +233,23 @@ public class KeywordEngine {
     // ═════════════════════════════════════════════
 
     /**
-     * 反射字段缓存：host 端类 → 解析出的 Field。
+     * 反射字段缓存：类全名#字段名 → 解析出的 Field。
      * TLRPC 的 results/reaction/count/emoticon 声明在抽象父类
      * （MessageReactions / ReactionCount / Reaction）上，运行时拿到的是
      * TL_messageReactions / TL_reactionCount / TL_reactionEmoji 子类实例，
      * 所以必须沿继承链查找而不是 getDeclaredField。
+     *
+     * ⚠️ key 必须含字段名：早期版本只按 Class 缓存，同类的第二个字段
+     * （如 reaction 之后的 count）会命中前一个字段的缓存，getInt() 作用在
+     * 非原始类型字段上抛 IllegalArgumentException 被静默吞掉 → 计数恒 0
+     * → 表情白名单全隐藏（v19 日志 RX-DEBUG 的 err 行即此症状）。
      */
-    private static final java.util.concurrent.ConcurrentHashMap<Class<?>, Field> fieldCache =
+    private static final java.util.concurrent.ConcurrentHashMap<String, Field> fieldCache =
             new java.util.concurrent.ConcurrentHashMap<>();
 
     private static Field cachedField(Class<?> clazz, String name) {
-        return fieldCache.computeIfAbsent(clazz, c -> findFieldInHierarchy(c, name));
+        return fieldCache.computeIfAbsent(clazz.getName() + "#" + name,
+                k -> findFieldInHierarchy(clazz, name));
     }
 
     private static Field findFieldInHierarchy(Class<?> clazz, String name) {

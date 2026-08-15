@@ -4,7 +4,7 @@
 - **仓库**: https://github.com/qxxwwyy/TGClean
 - **正式版本**: v1.0.0
 - **开发分支**: `feature/in-app-ui`（PR #1）
-- **当前测试版本**: v19（RX-DEBUG 调试 + 表情匹配健壮化，versionCode 6 / 1.2.2）
+- **当前测试版本**: v20（fieldCache key 修复，versionCode 7 / 1.2.3）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
