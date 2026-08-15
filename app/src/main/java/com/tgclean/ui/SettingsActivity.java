@@ -65,6 +65,7 @@ public class SettingsActivity extends AppCompatActivity {
     private View scrollContent;
     private TextView textChannelCount;
     private TextView textEmptyRules;
+    private TextView rowSearchDepth;
 
     private SharedPreferences remotePrefs = null;
     private SharedPreferences discoveredPrefs = null;
@@ -121,6 +122,9 @@ public class SettingsActivity extends AppCompatActivity {
         editChannelSearch = findViewById(R.id.edit_channel_search);
         textChannelCount = findViewById(R.id.text_channel_count);
 
+        rowSearchDepth = findViewById(R.id.row_search_depth);
+        rowSearchDepth.setOnClickListener(v -> showSearchDepthDialog());
+
         // 频道搜索
         editChannelSearch.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -150,6 +154,8 @@ public class SettingsActivity extends AppCompatActivity {
             writer = new FilterConfigWriter(remotePrefs);
 
             switchEnabled.setChecked(remotePrefs.getBoolean("filter_enabled", true));
+            rowSearchDepth.setText("默认检索深度："
+                    + ReactionsRule.formatDepth(writer.getReactionsSearchDepth()) + " 条");
 
             // 执行旧数据迁移
             boolean migrated = writer.migrateLegacyIfNeeded();
@@ -270,6 +276,39 @@ public class SettingsActivity extends AppCompatActivity {
         }
         result.sort((a, b) -> Long.compare(b.lastSeen, a.lastSeen));
         return result;
+    }
+
+    // ═════════════════════════════════════════════
+    // 表情筛选检索深度（全局默认）
+    // ═════════════════════════════════════════════
+
+    private void showSearchDepthDialog() {
+        if (writer == null) {
+            Snackbar.make(findViewById(android.R.id.content),
+                    "XposedService 未就绪", Snackbar.LENGTH_LONG).show();
+            return;
+        }
+        int current = writer.getReactionsSearchDepth();
+        String[] labels = new String[ReactionsRule.DEPTH_PRESETS.length];
+        int checked = 0;
+        for (int i = 0; i < labels.length; i++) {
+            labels[i] = ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]) + " 条";
+            if (ReactionsRule.DEPTH_PRESETS[i] == current) checked = i;
+        }
+        final int[] selected = {checked};
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("默认检索深度")
+                .setSingleChoiceItems(labels, checked, (d, which) -> selected[0] = which)
+                .setPositiveButton("确定", (d, which) -> {
+                    int depth = ReactionsRule.DEPTH_PRESETS[selected[0]];
+                    writer.setReactionsSearchDepth(depth);
+                    rowSearchDepth.setText("默认检索深度："
+                            + ReactionsRule.formatDepth(depth) + " 条");
+                    Snackbar.make(findViewById(android.R.id.content),
+                            "已保存，Telegram 内立即生效", Snackbar.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     // ═════════════════════════════════════════════

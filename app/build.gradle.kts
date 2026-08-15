@@ -11,8 +11,8 @@ android {
         applicationId = "com.tgclean"
         minSdk = 28
         targetSdk = 36
-        versionCode = 15
-        versionName = "1.4.3"
+        versionCode = 16
+        versionName = "1.4.4"
     }
 
     signingConfigs {

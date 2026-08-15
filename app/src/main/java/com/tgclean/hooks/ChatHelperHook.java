@@ -397,6 +397,25 @@ public class ChatHelperHook {
         editMax.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
         root.addView(editMax);
 
+        // ── 检索深度（级联自动向前翻找范围）──
+        root.addView(sectionLabel(context, "检索深度（筛选后剩太少时，自动向前翻找的范围）"));
+        int globalDepth = config.getReactionsSearchDepth();
+        RadioGroup depthGroup = new RadioGroup(context);
+        depthGroup.setOrientation(RadioGroup.HORIZONTAL);
+        RadioButton radioDepthDefault = new RadioButton(context);
+        radioDepthDefault.setText("默认(" + ReactionsRule.formatDepth(globalDepth) + ")");
+        radioDepthDefault.setPadding(0, 0, 0, 0);
+        depthGroup.addView(radioDepthDefault);
+        final RadioButton[] depthButtons = new RadioButton[ReactionsRule.DEPTH_PRESETS.length];
+        for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
+            depthButtons[i] = new RadioButton(context);
+            depthButtons[i].setText(ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]));
+            depthButtons[i].setMinWidth(dp(context, 36));
+            depthButtons[i].setPadding(0, 0, dp(context, 4), 0);
+            depthGroup.addView(depthButtons[i]);
+        }
+        root.addView(wrapHScroll(context, depthGroup));
+
         TextView hint = new TextView(context);
         hint.setText("提示：建议用快速选择以确保表情编码匹配；保存后重新进入频道生效");
         hint.setTextSize(12);
@@ -417,6 +436,19 @@ public class ChatHelperHook {
             editMin.setText("10");
             editMax.setText("20");
         }
+
+        // 检索深度预填：未设置(maxDepth=0)或值不在预设内 → 跟随默认
+        boolean depthMatched = false;
+        if (current != null) {
+            for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
+                if (ReactionsRule.DEPTH_PRESETS[i] == current.maxDepth) {
+                    depthButtons[i].setChecked(true);
+                    depthMatched = true;
+                    break;
+                }
+            }
+        }
+        if (!depthMatched) radioDepthDefault.setChecked(true);
 
         // 模式切换时启停负面表情区
         final View[] section2 = {label2, editEmoji2, editMax, row2};
@@ -470,8 +502,16 @@ public class ChatHelperHook {
                     }
                 }
 
+                int maxDepth = 0; // 0 = 跟随全局默认
+                for (int i = 0; i < depthButtons.length; i++) {
+                    if (depthButtons[i].isChecked()) {
+                        maxDepth = ReactionsRule.DEPTH_PRESETS[i];
+                        break;
+                    }
+                }
+
                 sendReactionsRuleBroadcast(context, dialogId,
-                        enabled, whitelist, emoji, minCount, emoji2, maxCount);
+                        enabled, whitelist, emoji, minCount, emoji2, maxCount, maxDepth);
 
                 String newTitle = enabled
                         ? "⚡ 表情过滤：" + describeRule(whitelist, emoji, minCount, emoji2, maxCount)
@@ -481,7 +521,8 @@ public class ChatHelperHook {
                 module.log(Log.INFO, TAG, "Reactions rule save sent: dialog=" + dialogId
                         + " enabled=" + enabled + " whitelist=" + whitelist
                         + " emoji=" + emoji + "≥" + minCount
-                        + " emoji2=" + emoji2 + "≤" + maxCount);
+                        + " emoji2=" + emoji2 + "≤" + maxCount
+                        + " depth=" + (maxDepth > 0 ? ReactionsRule.formatDepth(maxDepth) : "default"));
                 dialog.dismiss();
             } catch (Throwable t) {
                 module.log(Log.ERROR, TAG, "Save reactions rule failed: " + t.getMessage());
@@ -513,7 +554,7 @@ public class ChatHelperHook {
     private static void sendReactionsRuleBroadcast(Context context, long dialogId,
                                                    boolean enabled, boolean whitelist,
                                                    String emoji, int minCount,
-                                                   String emoji2, int maxCount) {
+                                                   String emoji2, int maxCount, int maxDepth) {
         Intent intent = new Intent(ACTION_REACTIONS_RULE);
         intent.setComponent(new ComponentName(TG_CLEAN_PACKAGE, RECEIVER_CLASS));
         intent.addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
@@ -524,6 +565,7 @@ public class ChatHelperHook {
         intent.putExtra("min_count", minCount);
         intent.putExtra("emoji2", emoji2 == null ? "" : emoji2);
         intent.putExtra("max_count", maxCount);
+        intent.putExtra("max_depth", maxDepth); // 0 = 跟随全局默认
 
         Context appContext = context.getApplicationContext();
         registerSaveConfirmation(appContext, 2500, () -> {

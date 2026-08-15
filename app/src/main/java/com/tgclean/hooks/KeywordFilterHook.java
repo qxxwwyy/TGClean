@@ -67,6 +67,7 @@ public class KeywordFilterHook {
     private static volatile Field fTlDialogId;      // TLRPC.Message.dialog_id
     private static volatile Field fTlPeerId;        // TLRPC.Message.peer_id
     private static volatile Field fTlReactions;     // TLRPC.Message.reactions
+    private static volatile Method fGetContext;     // BaseFragment.getContext()（Toast 用）
     private static volatile boolean fieldsResolved = false;
 
     private static void resolveFields(ClassLoader cl) {
@@ -131,7 +132,7 @@ public class KeywordFilterHook {
             return;
         }
 
-        hookMessagesDidLoad(cl, module, engine);
+        hookMessagesDidLoad(cl, module, engine, config);
         hookProcessNewMessages(cl, module, engine);
     }
 
@@ -141,7 +142,7 @@ public class KeywordFilterHook {
     // ═══════════════════════════════════════════════════
 
     private static void hookMessagesDidLoad(ClassLoader cl, XposedModule module,
-                                            KeywordEngine engine) {
+                                            KeywordEngine engine, FilterConfig config) {
         try {
             Class<?> caClass = cl.loadClass("org.telegram.ui.ChatActivity");
             Method target = caClass.getDeclaredMethod(
@@ -185,12 +186,12 @@ public class KeywordFilterHook {
                                     // 被滤掉的批次同样要推进滚动锚点，否则原生上滑
                                     // 会反复请求同一段已丢弃范围（永远加载不动）
                                     updateScrollAnchors(chatActivity, notifArgs, arr, module);
-                                    maybeCascade(chatActivity, module, notifArgs,
-                                            arr, kept);
+                                    maybeCascade(chatActivity, module, config, engine,
+                                            notifArgs, arr, kept);
                                 } else {
-                                    // 零过滤的健康批次同样重置级联计数（审计 F-6）：
+                                    // 零过滤的健康批次同样重置级联额度（审计 F-6）：
                                     // 否则混合场景下额度只增不减，最终误判"耗尽"
-                                    resetCascadeIfHealthy(chatActivity, module, arr);
+                                    resetCascadeIfHealthy(chatActivity, arr);
                                 }
                             }
                         }
@@ -223,36 +224,58 @@ public class KeywordFilterHook {
     // 消息滤空后页面显示"暂无消息"，用户无法滚动 → 历史无法继续加载 →
     // 筛选池无法扩大（结构性死锁）。
     //
-    // 方案：过滤导致 kept < CASCADE_MIN_ROWS 且未到历史尽头（isEnd=false）
-    // 时，镜像 TG 自身滚动加载的调用方式（ChatActivity L12375 模式：
-    // waitingForLoad.add(lastLoadIndex) → loadMessages(..., lastLoadIndex++)）
-    // 主动请求更早的 50 条。新批次仍走本 hook → 命中则继续级联，直到：
-    // 出现足量达标消息 / 历史到底（isEnd=true）/ 达到安全上限。
+    // v29 控制流（高阈值整批滤空场景实测驱动重写）：
+    // - 触发：仅当"前沿推进"——本批最老 id 深于本实例见过的最老 id。
+    //   推进 = 上一个在途请求已落地，此时才发起下一批（消耗额度）。
+    // - 忽略：非推进批次（TG 空视图重取的最新窗口 / 重复请求的回包）
+    //   一律不发起、不计数。v28 在此路径上"照常发起 + stuck 计数"，
+    //   结果重复回包自我复制：130ms 内同锚点 11 个在途请求，重复回包
+    //   把 stuck 计数 10 连击烧断通道——前沿明明每 600ms 推进一次却必死。
+    // - 单飞：任一时刻至多一个在途级联请求（putIfAbsent 时间戳）。
+    // - 看门狗：在途请求 CASCADE_STALE_MS 内无推进响应视为丢失，重发
+    //   一次（预算 WATCHDOG_MAX_REFIRES 次）。丢包恢复不再依赖计数。
+    // - 锚点 oldestSeenAnchor = 本实例见过的最老消息 id，只降不升，
+    //   健康批次也不重置——否则健康期后 TG 最新窗口重取会以
+    //   prevFrontier==null 重新"推进"，把整段已扫描范围重扫一遍。
+    // - 终点：历史到底（isEnd）或额度耗尽时 Toast 告知用户一次，
+    //   不再沉默显示"暂无消息"让用户猜。
     // ═══════════════════════════════════════════════════
 
     /** 剩余行数低于此值视为"无法滚动"（一屏约 8-12 条消息） */
     private static final int CASCADE_MIN_ROWS = 5;
-    /** 级联安全上限（100 批 × 50 条 = 5000 条），防止在大型频道失控 */
-    private static final int CASCADE_MAX_BATCHES = 100;
-    private static final int CASCADE_BATCH_SIZE = 50;
-    /** classGuid → 已级联批次数（classGuid 每 ChatActivity 实例唯一） */
+    /** 单批拉取条数（MessagesStorage LIMIT 上限 100，直接取满）。
+     *  单链额度不设常量：由检索深度动态计算（每频道规则 maxDepth 覆盖全局
+     *  默认 reactions_search_depth，见 maybeCascade），健康批次会重置额度 */
+    private static final int CASCADE_BATCH_SIZE = 100;
+    /** 在途请求无推进响应视为丢失的时限（网络回源单程可达数秒，过短会误判重发） */
+    private static final long CASCADE_STALE_MS = 4000;
+    /** 看门狗连续重发上限（响应全丢也最多再撑 40 × 4s） */
+    private static final int WATCHDOG_MAX_REFIRES = 40;
+
+    /** classGuid → 本链已推进批次数（额度；classGuid 每 ChatActivity 实例唯一） */
     private static final ConcurrentHashMap<Integer, Integer> cascadeCount =
             new ConcurrentHashMap<>();
-    /** classGuid → 是否有级联请求在途（防止与 TG 自身重试循环交叠时重复发起） */
-    private static final ConcurrentHashMap<Integer, Boolean> cascadeInFlight =
+    /** classGuid → 在途级联的发起时间戳（elapsedRealtime），单飞标记 */
+    private static final ConcurrentHashMap<Integer, Long> cascadeInFlightAt =
             new ConcurrentHashMap<>();
-    /** classGuid → 上次级联锚点（无推进的重复批次不消耗上限额度） */
-    private static final ConcurrentHashMap<Integer, Integer> lastCascadeAnchor =
+    /** classGuid → 本实例见过的最老消息 id（下降前沿，只降不升，健康不重置） */
+    private static final ConcurrentHashMap<Integer, Integer> oldestSeenAnchor =
             new ConcurrentHashMap<>();
-    /** classGuid → 连续"锚点未推进"级联发起次数（防病理性循环） */
-    private static final ConcurrentHashMap<Integer, Integer> stuckFireCount =
+    /** classGuid → 看门狗已重发次数 */
+    private static final ConcurrentHashMap<Integer, Integer> watchdogFires =
             new ConcurrentHashMap<>();
-    /** 连续无推进的级联发起上限 */
-    private static final int STUCK_FIRE_LIMIT = 10;
+    /** classGuid → 已发过终点提示（到底/额度耗尽只 Toast 一次） */
+    private static final Set<Integer> terminalNotified =
+            ConcurrentHashMap.newKeySet();
 
-    /** 零过滤的健康批次：真实行数充足时重置级联计数（与 maybeCascade 内的健康分支同语义） */
-    private static void resetCascadeIfHealthy(Object chatActivity, XposedModule module,
-                                               List<?> arr) {
+    /**
+     * 零过滤的健康批次：真实行数充足时重置额度/看门狗/终点提示（与
+     * maybeCascade 内的健康分支同语义）。锚点 oldestSeenAnchor 不重置：
+     * 它记录的是"本实例见过的最老消息"，健康期同样有效——重置会让
+     * TG 空视图随后重取的最新窗口以 prev==null 身份重新推进锚点，
+     * 把已扫描的整段历史重扫一遍。
+     */
+    private static void resetCascadeIfHealthy(Object chatActivity, List<?> arr) {
         try {
             int realRows = 0;
             for (Object obj : arr) {
@@ -265,23 +288,23 @@ public class KeywordFilterHook {
                 } catch (Throwable ignored) {}
                 if (guidObj != null && guidObj != 0) {
                     cascadeCount.remove(guidObj);
-                    lastCascadeAnchor.remove(guidObj);
-                    stuckFireCount.remove(guidObj);
+                    cascadeInFlightAt.remove(guidObj);
+                    watchdogFires.remove(guidObj);
+                    terminalNotified.remove(guidObj);
                 }
             }
         } catch (Throwable ignored) {}
     }
 
     private static void maybeCascade(Object chatActivity, XposedModule module,
+                                     FilterConfig config, KeywordEngine engine,
                                      Object[] notifArgs, List<?> originalArr,
                                      ArrayList<Object> kept) {
         try {
             if (chatActivity == null) return;
             Integer guidObj = (Integer) notifArgs[10];
+            if (guidObj == null || guidObj == 0) return;
             boolean isEnd = Boolean.TRUE.equals(notifArgs[9]);
-
-            // 任何新批次到达都意味着上一个在途请求大概率已落地，清在途标记
-            cascadeInFlight.remove(guidObj);
 
             // 只统计真实消息行：仅剩日期分隔行的视图同样无法滚动
             int realRows = 0;
@@ -291,73 +314,151 @@ public class KeywordFilterHook {
                 } catch (Throwable ignored) {}
             }
             if (realRows >= CASCADE_MIN_ROWS) {
-                cascadeCount.remove(guidObj); // 内容健康，重置计数
-                lastCascadeAnchor.remove(guidObj);
-                stuckFireCount.remove(guidObj);
+                // 内容健康，重置额度/看门狗/终点提示（锚点保留，见 resetCascadeIfHealthy）
+                cascadeCount.remove(guidObj);
+                cascadeInFlightAt.remove(guidObj);
+                watchdogFires.remove(guidObj);
+                terminalNotified.remove(guidObj);
                 return;
             }
-            if (isEnd) return; // 历史已到底，确实没有达标消息
+            if (isEnd) { // 历史已到底，确实没有达标消息
+                // 解除单飞并停用看门狗：已排定的 watchdog 读到 cur==null 自然退出。
+                // 否则终点后仍会对同一锚点徒劳重发直至预算耗尽（审计 v29-A1）
+                cascadeInFlightAt.remove(guidObj);
+                watchdogFires.remove(guidObj);
+                notifyTerminalOnce(guidObj, chatActivity, module, notifArgs,
+                        "已筛选至频道开头，未发现达标消息");
+                return;
+            }
 
             int batchMin = oldestPositiveMessageId(originalArr);
             if (batchMin <= 0) return;
 
-            // 下降前沿（frontier）：本实例已到达的最老消息 id，只降不升。
-            // TG 在 messagesByDays 为空时会退化为 max_id=0 反复重取最新窗口
-            // （其批次 min 高于前沿），级联必须始终从前沿继续请求更早历史，
-            // 而不是被 TG 的重复批次带偏回最新端。
             int guid = guidObj;
-            Integer prevFrontier = lastCascadeAnchor.put(guid, batchMin);
-            int frontier = Math.min(batchMin, prevFrontier == null ? batchMin : prevFrontier);
-            lastCascadeAnchor.put(guid, frontier);
-            boolean advanced = prevFrontier == null || frontier < prevFrontier;
-
-            int n;
-            if (advanced) {
-                // 前沿推进 = 正常下降链，计入额度
-                n = cascadeCount.merge(guid, 1, Integer::sum);
-                if (cascadeCount.size() > 100) cascadeCount.clear(); // 防泄漏
-                if (n > CASCADE_MAX_BATCHES) {
-                    if (n == CASCADE_MAX_BATCHES + 1) {
-                        module.log(Log.WARN, TAG, "Cascade cap reached ("
-                                + CASCADE_MAX_BATCHES + " batches ≈ "
-                                + (CASCADE_MAX_BATCHES * CASCADE_BATCH_SIZE)
-                                + " msgs) for dialog=" + notifArgs[0] + ", giving up");
-                    }
-                    return;
-                }
-                stuckFireCount.remove(guid);
-            } else {
-                // 前沿未推进 = TG 空视图重复批次。仍从前沿发起（继续下降），
-                // 不消耗额度；连续多次无推进则放弃（防病理性循环）。
-                // 额度耗尽后此通道同样关闭（硬上限，审计 N-1）。
-                if (cascadeCount.getOrDefault(guid, 0) > CASCADE_MAX_BATCHES) return;
-                int stuck = stuckFireCount.merge(guid, 1, Integer::sum);
-                if (stuck > STUCK_FIRE_LIMIT) {
-                    if (stuck == STUCK_FIRE_LIMIT + 1) {
-                        module.log(Log.WARN, TAG, "Cascade stuck-fire limit reached ("
-                                + STUCK_FIRE_LIMIT + ") for dialog=" + notifArgs[0]);
-                    }
-                    return;
-                }
-                n = cascadeCount.getOrDefault(guid, 0);
+            Integer prev = oldestSeenAnchor.put(guid, batchMin);
+            int frontier = Math.min(batchMin, prev == null ? batchMin : prev);
+            oldestSeenAnchor.put(guid, frontier);
+            if (prev != null && frontier >= prev) {
+                // 未推进：TG 空视图重取的最新窗口 / 重复请求的回包。
+                // 直接忽略——不发起、不计数（v28 的 stuck 螺旋死因，
+                // 丢包恢复由看门狗负责，不靠这里的计数）。
+                return;
             }
-            // 已有在途级联（尚未收到响应批次）时不重复发起
-            if (cascadeInFlight.putIfAbsent(guid, Boolean.TRUE) != null) return;
 
+            // 前沿推进 = 上一个在途请求已落地，解除单飞标记；
+            // 通道存活证明 → 看门狗预算滑动续期，慢链环不累计烧预算（审计 v29-A3）
+            cascadeInFlightAt.remove(guid);
+            watchdogFires.remove(guid);
+            int n = cascadeCount.merge(guid, 1, Integer::sum);
+            if (cascadeCount.size() > 200) cascadeCount.clear(); // 防泄漏（guid 生命周期=实例）
+            if (oldestSeenAnchor.size() > 200) oldestSeenAnchor.clear();
+
+            // 检索深度：频道启用表情规则且设了深度 → 该频道一切级联都按它
+            // （含关键词过滤触发的级联，"这个频道挖多深"是频道级属性）；
+            // 否则用全局默认（App 设置页 reactions_search_depth）
             long dialogId = (Long) notifArgs[0];
-            int mode = (Integer) notifArgs[14];
-            module.log(Log.INFO, TAG, "Cascade #" + n + (advanced ? "" : "(stuck)")
-                    + ": only " + realRows + " real rows survived, auto-loading "
-                    + CASCADE_BATCH_SIZE + " older messages (dialog=" + dialogId
-                    + ", older<" + frontier + ")");
-
-            // post 到主线程末尾执行，避免在 NotificationCenter 派发循环内重入
-            final int anchor = frontier;
-            new android.os.Handler(android.os.Looper.getMainLooper()).post(() ->
-                    triggerCascadeLoad(chatActivity, module, dialogId, anchor, mode));
+            ReactionsRule depthRule = engine.getActiveRule(dialogId);
+            int depth = depthRule != null && depthRule.maxDepth > 0
+                    ? depthRule.maxDepth : config.getReactionsSearchDepth();
+            int maxBatches = Math.max(1, (depth + CASCADE_BATCH_SIZE - 1) / CASCADE_BATCH_SIZE);
+            if (n > maxBatches) {
+                notifyTerminalOnce(guidObj, chatActivity, module, notifArgs,
+                        "已连续筛选约" + ReactionsRule.formatDepth(depth)
+                                + "条历史仍未发现达标消息，已停止自动加载（可在⚡表情过滤里调大检索深度）");
+                return;
+            }
+            if (n % 10 == 0) {
+                module.log(Log.INFO, TAG, "Cascade progress #" + n + "/" + maxBatches
+                        + " (dialog=" + dialogId + ", frontier=" + frontier + ")");
+            }
+            fireCascade(chatActivity, module, dialogId, (Integer) notifArgs[14],
+                    guid, frontier, n, realRows);
         } catch (Throwable t) {
             module.log(Log.ERROR, TAG, "maybeCascade error: " + t.getMessage());
         }
+    }
+
+    /** 发起一次级联加载（单飞：putIfAbsent 时间戳，任一时刻至多一个在途请求） */
+    private static void fireCascade(Object chatActivity, XposedModule module,
+                                    long dialogId, int mode, int guid,
+                                    int anchor, int seq, int realRows) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (cascadeInFlightAt.putIfAbsent(guid, now) != null) return;
+        module.log(Log.INFO, TAG, "Cascade #" + seq + ": only " + realRows
+                + " real rows survived, auto-loading " + CASCADE_BATCH_SIZE
+                + " older messages (dialog=" + dialogId + ", older<" + anchor + ")");
+        // post 到主线程末尾执行，避免在 NotificationCenter 派发循环内重入
+        android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        final int anc = anchor;
+        h.post(() -> triggerCascadeLoad(chatActivity, module, dialogId, anc, mode));
+        h.postDelayed(() -> cascadeWatchdog(chatActivity, module, dialogId, mode, guid, now),
+                CASCADE_STALE_MS + 250);
+    }
+
+    /**
+     * 看门狗：CASCADE_STALE_MS 内没有推进响应则判定在途请求丢失，重发一次。
+     * 这是唯一的丢包恢复路径（替代 v28 的 stuck 计数——那个会把正常的
+     * 重复回包/TG 重取批次误判为病态循环并烧断通道）。
+     */
+    private static void cascadeWatchdog(Object chatActivity, XposedModule module,
+                                        long dialogId, int mode, int guid, long myTs) {
+        try {
+            Long cur = cascadeInFlightAt.get(guid);
+            if (cur == null || cur != myTs) return; // 已被推进响应解除/被新一代取代
+            Integer anchorObj = oldestSeenAnchor.get(guid);
+            if (anchorObj == null || anchorObj <= 0) {
+                // 锚点只会在防泄漏 clear 中被清空（健康重置不清锚点，但会清
+                // inFlightAt 使 watchdog 在上一道时间戳检查就退出）——此处链路
+                // 降级为纯响应驱动，不再续链
+                cascadeInFlightAt.remove(guid);
+                return;
+            }
+            int wd = watchdogFires.merge(guid, 1, Integer::sum);
+            if (wd > WATCHDOG_MAX_REFIRES) {
+                cascadeInFlightAt.remove(guid);
+                module.log(Log.WARN, TAG, "Cascade watchdog gave up (no descending response"
+                        + " for " + (WATCHDOG_MAX_REFIRES * CASCADE_STALE_MS / 1000)
+                        + "s) dialog=" + dialogId);
+                return;
+            }
+            long now = android.os.SystemClock.elapsedRealtime();
+            // 条件替换：仅当仍是本代时间戳时续期，避免覆写并发新代（审计 v29-A2）
+            if (!cascadeInFlightAt.replace(guid, myTs, now)) return;
+            module.log(Log.INFO, TAG, "Cascade watchdog refire #" + wd
+                    + " (dialog=" + dialogId + ", older<" + anchorObj + ")");
+            final int anc = anchorObj;
+            android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+            h.post(() -> triggerCascadeLoad(chatActivity, module, dialogId, anc, mode));
+            h.postDelayed(() -> cascadeWatchdog(chatActivity, module, dialogId, mode, guid, now),
+                    CASCADE_STALE_MS + 250);
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "Cascade watchdog error: " + t.getMessage());
+        }
+    }
+
+    /** 终点提示（到底/额度耗尽）：日志 + Toast 各一次，用户不再面对沉默的"暂无消息" */
+    private static void notifyTerminalOnce(Integer guid, Object chatActivity,
+                                           XposedModule module, Object[] notifArgs,
+                                           String message) {
+        if (!terminalNotified.add(guid)) return;
+        module.log(Log.WARN, TAG, "Cascade terminal (dialog=" + notifArgs[0] + "): " + message);
+        try {
+            // BaseFragment.getContext()（公共方法）；Toast 经主线程 Handler 投递，
+            // 不依赖回调线程
+            if (fGetContext == null) {
+                fGetContext = chatActivity.getClass().getMethod("getContext");
+            }
+            Object ctx = fGetContext.invoke(chatActivity);
+            if (ctx instanceof android.content.Context) {
+                final android.content.Context c = (android.content.Context) ctx;
+                new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> {
+                    try {
+                        android.widget.Toast.makeText(c, "TGClean：" + message,
+                                android.widget.Toast.LENGTH_LONG).show();
+                    } catch (Throwable ignored) {}
+                });
+            }
+        } catch (Throwable ignored) {}
     }
 
     /**

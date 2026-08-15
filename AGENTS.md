@@ -4,7 +4,7 @@
 - **仓库**: https://github.com/qxxwwyy/TGClean
 - **正式版本**: v1.0.0
 - **开发分支**: `feature/in-app-ui`（PR #1）
-- **当前测试版本**: v28（frontier 级联重构 + 锚点下标修复，versionCode 15 / 1.4.3）
+- **当前测试版本**: v29（级联控制流重写 + 每频道/全局检索深度配置，versionCode 16 / 1.4.4）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
@@ -111,6 +111,7 @@ app/src/main/res/layout/
 9. **ContentProvider 方案已废弃**（Android 11+ resolveContentProvider 返回 NULL）
 10. **过滤不做跨实例去重**（v16）：同一 TL 消息会多次构造 MessageObject（通知预览/会话列表/聊天窗口），按 (dialogId,msgId) 去重跳过标记会导致打开频道时漏过滤"复活"，每实例独立评估
 11. **每频道表情过滤**（v17，取代旧全局 reactions）：白名单模式只显示达标消息（如 ❤️≥10 且 👎≤20），黑名单模式隐藏达标消息；在 TG 频道菜单直接配置（headerItem 注入 ⚡ 项 + framework AlertDialog 弹窗 + 表情快速选择行），保存经显式广播 → ChannelReceiver → RemoteConfigStore（服务未就绪排队）写 remote prefs → 框架实时推送回 TG 进程热更新；匹配基于 TL_reactionEmoji.emoticon 字符串精确相等，自定义表情(document_id)/付费星星无法匹配
+12. **检索深度两级配置**（v29）：筛选后剩行过少时级联自动向前翻找的消息条数上限。全局默认存 remote prefs `reactions_search_depth`（App 设置页 ⚡表情筛选 卡片，App 端 FilterConfigWriter 写 / hook 端 FilterConfig 读）；每频道覆盖存规则 JSON 字段 `maxDepth`（0=跟随默认，TG 内 ⚡弹窗单选行）。预设 {5千,1万,1.5万,3万,5万}，默认 1.5万；额度=深度/批大小(100) 动态计算。频道启用表情规则且设了深度时，该频道一切级联（含关键词触发的）都按频道深度；无规则/未启用时用全局默认
 
 ## 发布规则
 - **只有用户明确说明"正式版本"时才发布 GitHub Release**
@@ -126,6 +127,8 @@ app/src/main/res/layout/
 - `materialButtonTextStyle` attr 在 Material3 中不存在，用 `borderlessButtonStyle`
 - CI artifact 名为 `TGClean-debug`（非 `app-debug`）
 - Chromium snap 存根不可用，Playwright 路径含版本号可能过期
+- **级联防重复不能靠"到达批次清在途标记"**（v28→v29 教训）：高阈值整批滤空时 TG 空视图自身会高频重取最新窗口，这些非推进批次若触发发起，重复回包又触发更多发起——130ms 内同锚点 11 个在途请求，stuck 计数被自己的重复回包 10 连击烧断。正确纪律：只有"前沿推进"（= 响应已落地）才发起下一次；非推进批次纯忽略；丢包恢复交给时间看门狗（CASCADE_STALE_MS 重发，预算封顶）
+- **级联锚点不能在健康批次时重置**：重置后 TG 最新窗口重取会以 prev==null 身份重新"推进"，把已扫描范围整段重扫。锚点语义应为"本实例见过的最老消息 id"，单调不升、实例生命周期内不重置
 
 ## v16 review 结论（2026-08-14，对照 TG master 12.9.2 + libxposed 101.0.1）
 **修复的 bug**：

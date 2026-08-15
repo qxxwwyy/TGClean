@@ -88,6 +88,7 @@ public class ChannelReceiver extends BroadcastReceiver {
         rule.minCount = intent.getIntExtra("min_count", 0);
         rule.emoji2 = intent.getStringExtra("emoji2");
         rule.maxCount = intent.getIntExtra("max_count", 0);
+        rule.maxDepth = intent.getIntExtra("max_depth", 0); // 0 = 跟随全局默认
         if (rule.emoji == null) rule.emoji = "";
         if (rule.emoji2 == null) rule.emoji2 = "";
 

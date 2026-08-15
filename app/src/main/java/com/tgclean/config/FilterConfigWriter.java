@@ -34,6 +34,7 @@ public class FilterConfigWriter {
     private static final String KEY_CHANNEL_RULES = "channel_rules"; // legacy
     private static final String KEY_WHITELIST = "whitelist";
     private static final String KEY_REACTIONS_RULES = "reactions_channel_rules";
+    private static final String KEY_REACTIONS_DEPTH = "reactions_search_depth";
     // 注：频道发现数据存于 App 本地 prefs（ChannelReceiver 管理），不在本 remote prefs 中
     private static final String KEY_RULE_SETS = "rule_sets";
     private static final String KEY_RULE_SET_CHANNELS = "rule_set_channels";
@@ -338,6 +339,7 @@ public class FilterConfigWriter {
                 rule.minCount = r.optInt("minCount", 0);
                 rule.emoji2 = r.optString("emoji2", "");
                 rule.maxCount = r.optInt("maxCount", 0);
+                rule.maxDepth = r.optInt("maxDepth", 0);
                 try {
                     result.put(Long.parseLong(key), rule);
                 } catch (NumberFormatException ignored) {}
@@ -363,12 +365,26 @@ public class FilterConfigWriter {
                 r.put("minCount", e.getValue().minCount);
                 r.put("emoji2", e.getValue().emoji2 != null ? e.getValue().emoji2 : "");
                 r.put("maxCount", e.getValue().maxCount);
+                r.put("maxDepth", e.getValue().maxDepth);
                 obj.put(String.valueOf(e.getKey()), r);
             }
             prefs.edit().putString(KEY_REACTIONS_RULES, obj.toString()).apply();
         } catch (JSONException e) {
             Log.e(TAG, "Failed to save reactions rule for " + dialogId, e);
         }
+    }
+
+    /**
+     * 表情筛选全局默认检索深度（条）。每频道规则 maxDepth=0 时级联用它，
+     * 关键词过滤触发的级联同样用它。框架按 key 实时推送到 TG 进程。
+     */
+    public int getReactionsSearchDepth() {
+        int v = prefs.getInt(KEY_REACTIONS_DEPTH, ReactionsRule.DEFAULT_MAX_DEPTH);
+        return v > 0 ? v : ReactionsRule.DEFAULT_MAX_DEPTH;
+    }
+
+    public void setReactionsSearchDepth(int depth) {
+        prefs.edit().putInt(KEY_REACTIONS_DEPTH, depth).apply();
     }
 
     // ═════════════════════════════════════════════

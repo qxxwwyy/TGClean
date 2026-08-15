@@ -102,6 +102,50 @@
 
             </com.google.android.material.card.MaterialCardView>
 
+            <!-- ═══ 表情筛选卡片 ═══ -->
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                app:cardCornerRadius="16dp"
+                app:cardElevation="0dp"
+                app:strokeWidth="1dp"
+                app:strokeColor="?attr/colorOutlineVariant">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="16dp">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="⚡ 表情筛选"
+                        android:textAppearance="?attr/textAppearanceTitleSmall"
+                        android:textColor="?attr/colorPrimary"
+                        android:layout_marginBottom="4dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="默认检索深度：筛选后所剩太少时，自动向前翻找的消息条数上限。频道内 ⚡表情过滤 可单独覆盖"
+                        android:textAppearance="?attr/textAppearanceBodySmall"
+                        android:textColor="?attr/colorOnSurfaceVariant"
+                        android:layout_marginBottom="4dp" />
+
+                    <TextView
+                        android:id="@+id/row_search_depth"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="默认检索深度：1.5万 条"
+                        android:textAppearance="?attr/textAppearanceBodyMedium"
+                        android:paddingVertical="8dp" />
+
+                </LinearLayout>
+
+            </com.google.android.material.card.MaterialCardView>
+
             <!-- ═══ 规则集卡片 ═══ -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"

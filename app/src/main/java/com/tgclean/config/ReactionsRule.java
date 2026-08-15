@@ -6,7 +6,8 @@ package com.tgclean.config;
  * JSON 形态：
  *   {"<dialogId>": {"enabled":true,"whitelist":true,
  *                   "emoji":"❤️","minCount":10,
- *                   "emoji2":"👎","maxCount":20}}
+ *                   "emoji2":"👎","maxCount":20,
+ *                   "maxDepth":30000}}
  *
  * 语义：
  * - 白名单模式（whitelist=true）：只显示达标消息，其余隐藏。
@@ -14,17 +15,27 @@ package com.tgclean.config;
  *     用途：资源频道快速定位高价值内容（如 ❤️≥10 的资源）。
  * - 黑名单模式（whitelist=false）：达标即隐藏，其余显示。
  *     达标 = count(emoji) ≥ minCount（此时 emoji 通常配为踩的表达情）
+ * - 检索深度（maxDepth，条）：筛选结果太少时级联自动向前翻找的消息数上限。
+ *     0 = 跟随全局默认（remote prefs `reactions_search_depth`，
+ *     由 TGClean App 设置页配置，初始 DEFAULT_MAX_DEPTH）。
  *
  * 表情匹配基于 TL_reactionEmoji.emoticon 的字符串精确相等，
  * 仅支持标准 emoji（自定义表情 reaction 是 document_id，无法按字符匹配）。
  */
 public class ReactionsRule {
+    /** 检索深度预设（条）：弹窗/App 快速选择用 */
+    public static final int[] DEPTH_PRESETS = {5000, 10000, 15000, 30000, 50000};
+    /** 全局默认检索深度（条）：未单独设置的频道与关键词过滤路径共用 */
+    public static final int DEFAULT_MAX_DEPTH = 15000;
+
     public boolean enabled;
     public boolean whitelistMode;
     public String emoji = "";
     public int minCount;
     public String emoji2 = "";
     public int maxCount;
+    /** 本频道检索深度（条）；0 = 跟随全局默认 */
+    public int maxDepth;
 
     public boolean hasEmoji2() {
         return emoji2 != null && !emoji2.isEmpty();
@@ -49,7 +60,19 @@ public class ReactionsRule {
         if (hasEmoji2()) {
             sb.append(" emoji2=").append(codepoints(emoji2)).append(" max=").append(maxCount);
         }
+        sb.append(" depth=").append(maxDepth > 0 ? formatDepth(maxDepth) : "default");
         return sb.toString();
+    }
+
+    /** 深度显示：5000 → "5000"，15000 → "1.5万"，50000 → "5万" */
+    public static String formatDepth(int v) {
+        if (v >= 10000) {
+            float w = v / 10000f;
+            String s = (w == Math.floor(w)) ? String.valueOf((int) w)
+                    : String.valueOf(Math.round(w * 10) / 10f);
+            return s + "万";
+        }
+        return String.valueOf(v);
     }
 
     private static String codepoints(String s) {

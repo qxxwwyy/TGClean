@@ -44,6 +44,7 @@ public class FilterConfig {
     private static final String KEY_CHANNEL_RULES = "channel_rules"; // legacy
     private static final String KEY_WHITELIST = "whitelist";
     private static final String KEY_REACTIONS_RULES = "reactions_channel_rules";
+    private static final String KEY_REACTIONS_DEPTH = "reactions_search_depth";
     private static final String KEY_RULE_SETS = "rule_sets";
     private static final String KEY_RULE_SET_CHANNELS = "rule_set_channels";
 
@@ -76,6 +77,15 @@ public class FilterConfig {
 
     public boolean isUseRegex() {
         return prefs.getBoolean(KEY_USE_REGEX, false);
+    }
+
+    /**
+     * 表情筛选全局默认检索深度（条）。每频道规则 maxDepth>0 时被其覆盖；
+     * 关键词过滤触发的级联也用它。RemotePreferences 按 key 实时更新。
+     */
+    public int getReactionsSearchDepth() {
+        int v = prefs.getInt(KEY_REACTIONS_DEPTH, ReactionsRule.DEFAULT_MAX_DEPTH);
+        return v > 0 ? v : ReactionsRule.DEFAULT_MAX_DEPTH;
     }
 
     // ═════════════════════════════════════════════
@@ -225,6 +235,7 @@ public class FilterConfig {
                 rule.minCount = r.optInt("minCount", 0);
                 rule.emoji2 = r.optString("emoji2", "");
                 rule.maxCount = r.optInt("maxCount", 0);
+                rule.maxDepth = r.optInt("maxDepth", 0);
                 try {
                     result.put(Long.parseLong(key), rule);
                 } catch (NumberFormatException ignored) {}
