@@ -66,6 +66,9 @@ App 设置页「调试日志」开关（默认关）。开启后 LSPosed 日志�
 
 产物：`app/build/outputs/apk/release/app-release.apk`（R8 混淆 + 仓库 keystore 签名；密码可用环境变量 `TGCLEAN_KS_PASS` 覆盖，见 `app/build.gradle.kts`）。
 
+- **正式版 APK**：从 [Releases](https://github.com/qxxwwyy/TGClean/releases) 下载（`TGClean-v*.apk`，tag 推送自动构建直传）
+- **测试版 APK**：从 Actions 里测试分支 PR 的构建产物获取（`TGClean-debug` / `TGClean-release`）；开发流程为测试分支验证通过后才合并发布
+
 ## 许可证
 
 MIT

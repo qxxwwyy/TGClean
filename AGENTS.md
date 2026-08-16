@@ -2,9 +2,8 @@
 
 ## 项目状态
 - **仓库**: https://github.com/qxxwwyy/TGClean
-- **正式版本**: v1.0.0、v2.0.0（tag 触发 release.yml，APK 直传 Release）
-- **开发分支**: `feature/in-app-ui`（PR #2 开放中，等用户验证后合并 main）
-- **当前测试版本**: v2.0.2（级联额度单调化修复"从头再扫"/僵尸链治理/深度默认500+自定义输入，versionCode 20）
+- **正式版本**: v1.0.0、v2.0.0、v2.0.2（tag 触发 release.yml，APK 直传 Release）
+- **最新版本**: v2.0.2（级联额度单调化修复"从头再扫"/僵尸链治理/深度默认500+自定义输入，versionCode 20）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
@@ -117,6 +116,13 @@ app/src/main/res/layout/
 15. **无"保存"按钮**（v2.0.0）：全 App 即改即存（remote prefs 实时推送架构下保存是伪概念），总开关拨动即写 + Snackbar 反馈；否则 100+ 频道时按钮沉底要滑很久
 16. **频道列表默认折叠 10 条**（v2.0.0）：超过 10 条显示"显示全部 N 个频道"footer；搜索自动展开、清空恢复折叠；搜索 200ms 防抖 + 数据缓存内存过滤（不重复解析 JSON）
 17. **级联额度实例内单调**（v2.0.2，日志确证的"从头再扫"根因）：健康批次（存活行≥5，多为用户上滑的原生回包）只休眠链（解除单飞+撤徽标+锚点 merge min），不清 cascadeCount/cascadeFound/terminalNotified——全清会让交替健康/滤空批次反复授满额度、徽章进度归零重启（用户观感 500/深度→100/深度 重扫）。僵尸链治理：看门狗预算 40→8（压栈实例请求永无推进响应，只能烧满预算自灭）+ cascadeActiveActivity 弱引用记录现任开火实例（terminal 链不占用身份），旧实例看门狗软让位（只解除单飞/停 re-post，状态全保留，回频道可无损续链——硬清会让快速 A→B→A 复现进度归零，审计 v2.0.2 B-1）。已知局限：重进频道产生新 classGuid，前沿不跨实例继承（缓存内重滤、开销可接受，dialogId 键迁移有跨实例污染/空视图死锁风险，暂不做）
+
+## 开发分支工作流（必须遵守）
+1. **一切开发/修复先在测试分支进行**：提交推送到 `feature/*` 测试分支，**禁止直接推送 main**
+2. **测试分支建 PR 指向 main 并保持打开**：PR 是 CI 的构建载体（push 到 PR 分支触发 build.yml debug+release 双构建），测试 APK 从 PR 的 Actions 产物 `TGClean-debug` / `TGClean-release` 下载发给用户实测
+3. **模块代码变更编译前必须子代理独立审计**（站立规则）：审计有 BLOCKER/MAJOR 先修再编译提交
+4. **用户实测确认 + 明确说"推送正式版/合并"才动 main**：合并 PR → 打 `v*` tag → release.yml 自动 APK 直传 Release；用户没说就停在测试分支，不合并、不发 Release
+5. 上一轮 PR 合并后，新一轮开发重新建 PR 作为 CI 载体（直接 push 裸分支不触发 CI）
 
 ## 发布规则
 - **只有用户明确说明"正式版本"时才发布 GitHub Release**
