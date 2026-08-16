@@ -407,12 +407,36 @@ public class ChatHelperHook {
         // （用户实测"保存按钮没了"），下拉选择一行搞定
         root.addView(sectionLabel(context, "检索深度（筛选后剩太少时，自动向前翻找的范围）"));
         int globalDepth = config.getReactionsSearchDepth();
-        final String[] depthChoices = new String[ReactionsRule.DEPTH_PRESETS.length + 1];
+        // 末位固定“自定义…”：非预设深度（如旧版存的 15000/30000）落在该档
+        final int customIdx = ReactionsRule.DEPTH_PRESETS.length + 1;
+        final String[] depthChoices = new String[ReactionsRule.DEPTH_PRESETS.length + 2];
         depthChoices[0] = "跟随全局默认（当前 " + ReactionsRule.formatDepth(globalDepth) + " 条）";
         for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
             depthChoices[i + 1] = ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]) + " 条";
         }
-        final int[] selectedDepth = {0}; // 下标 0 = 跟随默认 → maxDepth 0
+        depthChoices[customIdx] = "自定义…";
+        // 预填：规则深度匹配预设则选中对应项，非预设正值落自定义档
+        int presetIdx = 0;
+        int prefillCustom = 0;
+        if (current != null && current.maxDepth > 0) {
+            for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
+                if (ReactionsRule.DEPTH_PRESETS[i] == current.maxDepth) {
+                    presetIdx = i + 1;
+                    break;
+                }
+            }
+            if (presetIdx == 0) {
+                presetIdx = customIdx;
+                prefillCustom = current.maxDepth;
+                depthChoices[customIdx] = "自定义（" + ReactionsRule.formatDepth(current.maxDepth) + " 条）";
+            }
+        }
+        final int[] selectedDepth = {presetIdx}; // 初始即预填档（审计 A-3）
+        final int[] customDepth = {prefillCustom}; // 自定义档的值（条）
+        // 程序化 setSelection 的首个 onItemSelected 回调是布局后异步派发的，
+        // 同步置标志挡不住——改用"吞掉首个回调"：首回调只记录档位不弹输入框
+        // （否则预填自定义档时弹窗一打开就自动弹输入框，审计 A-1）
+        final boolean[] spinnerReady = {false};
         android.widget.Spinner depthSpinner = new android.widget.Spinner(context);
         android.widget.ArrayAdapter<String> depthAdapter = new android.widget.ArrayAdapter<>(
                 context, android.R.layout.simple_spinner_item, depthChoices);
@@ -420,19 +444,17 @@ public class ChatHelperHook {
         depthSpinner.setAdapter(depthAdapter);
         depthSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> p, View v, int pos, long id) {
+                if (!spinnerReady[0]) { // 首个回调 = 程序预填
+                    spinnerReady[0] = true;
+                    selectedDepth[0] = pos;
+                    return;
+                }
                 selectedDepth[0] = pos;
+                if (pos == customIdx) promptCustomDepth(context, depthChoices, customIdx,
+                        customDepth, depthAdapter);
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> p) {}
         });
-        int presetIdx = 0; // 预填：规则深度匹配预设则选中对应项，否则跟随默认
-        if (current != null) {
-            for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
-                if (ReactionsRule.DEPTH_PRESETS[i] == current.maxDepth) {
-                    presetIdx = i + 1;
-                    break;
-                }
-            }
-        }
         depthSpinner.setSelection(presetIdx);
         root.addView(depthSpinner);
 
@@ -514,8 +536,19 @@ public class ChatHelperHook {
                     }
                 }
 
-                int maxDepth = selectedDepth[0] > 0
-                        ? ReactionsRule.DEPTH_PRESETS[selectedDepth[0] - 1] : 0; // 0 = 跟随全局默认
+                int maxDepth;
+                if (selectedDepth[0] == customIdx) {
+                    if (customDepth[0] <= 0) {
+                        Toast.makeText(context,
+                                "请先在“自定义…”中输入检索深度", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    maxDepth = customDepth[0];
+                } else if (selectedDepth[0] > 0) {
+                    maxDepth = ReactionsRule.DEPTH_PRESETS[selectedDepth[0] - 1];
+                } else {
+                    maxDepth = 0; // 0 = 跟随全局默认
+                }
 
                 // 令牌随写请求带回 App 端校验（防伪造，审计 M-1）；
                 // nonce 供回执防伪 + 菜单标题在回执确认后才更新（UX 复核 P1-8）
@@ -686,6 +719,38 @@ public class ChatHelperHook {
         tv.setText(text);
         tv.setPadding(0, dp(context, 10), 0, dp(context, 4));
         return tv;
+    }
+
+    /** 深度自定义档输入：钳制到 [MIN_DEPTH, MAX_DEPTH] 后回填 Spinner 档位标签 */
+    private static void promptCustomDepth(Context context, String[] depthChoices, int customIdx,
+                                          int[] customDepth, android.widget.ArrayAdapter<String> adapter) {
+        EditText input = new EditText(context);
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        if (customDepth[0] > 0) input.setText(String.valueOf(customDepth[0]));
+        input.setHint(ReactionsRule.MIN_DEPTH + " ~ " + ReactionsRule.formatDepth(ReactionsRule.MAX_DEPTH));
+        new android.app.AlertDialog.Builder(context)
+                .setTitle("自定义检索深度（条）")
+                .setView(input)
+                .setPositiveButton("确定", (d, w) -> {
+                    String t = input.getText().toString().trim();
+                    int v;
+                    try {
+                        v = Integer.parseInt(t);
+                    } catch (NumberFormatException e) {
+                        // 超 int 范围的纯数字按上限钳制，非数字才报错（审计 A-2）
+                        v = t.matches("\\d{10,}") ? ReactionsRule.MAX_DEPTH : -1;
+                    }
+                    if (v <= 0) {
+                        Toast.makeText(context, "请输入正整数", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    customDepth[0] = ReactionsRule.clampDepth(v);
+                    depthChoices[customIdx] = "自定义（"
+                            + ReactionsRule.formatDepth(customDepth[0]) + " 条）";
+                    adapter.notifyDataSetChanged();
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     /** 表情快速选择行：点击即写入目标输入框；可选附加"清除"按钮 */

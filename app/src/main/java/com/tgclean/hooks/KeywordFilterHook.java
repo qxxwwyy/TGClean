@@ -240,9 +240,12 @@ public class KeywordFilterHook {
     // - 单飞：任一时刻至多一个在途级联请求（putIfAbsent 时间戳）。
     // - 看门狗：在途请求 CASCADE_STALE_MS 内无推进响应视为丢失，重发
     //   一次（预算 WATCHDOG_MAX_REFIRES 次）。丢包恢复不再依赖计数。
-    // - 锚点 oldestSeenAnchor = 本实例见过的最老消息 id，只降不升，
-    //   健康批次也不重置——否则健康期后 TG 最新窗口重取会以
-    //   prevFrontier==null 重新"推进"，把整段已扫描范围重扫一遍。
+    // - 锚点 oldestSeenAnchor = 本实例见过的最老消息 id，只降不升
+    //   （merge min），健康批次同样并入——重置会让健康期后 TG 最新窗口
+    //   重取以 prevFrontier==null 重新"推进"，把已扫描范围重扫一遍。
+    // - 额度（cascadeCount）实例生命周期内单调：健康批次只休眠链、不清
+    //   计数（v2.0.2：清零导致交替健康/滤空批次反复授满额度、徽章进度
+    //   归零重启，用户观感即"从头再扫"）。
     // - 终点：历史到底（isEnd）或额度耗尽时 Toast 告知用户一次，
     //   不再沉默显示"暂无消息"让用户猜。
     // ═══════════════════════════════════════════════════
@@ -251,12 +254,17 @@ public class KeywordFilterHook {
     private static final int CASCADE_MIN_ROWS = 5;
     /** 单批拉取条数（MessagesStorage LIMIT 上限 100，直接取满）。
      *  单链额度不设常量：由检索深度动态计算（每频道规则 maxDepth 覆盖全局
-     *  默认 reactions_search_depth，见 maybeCascade），健康批次会重置额度 */
+     *  默认 reactions_search_depth，见 maybeCascade）。额度在实例生命周期内
+     *  单调递增不重置——健康批次清零会让交替出现的健康/滤空批次把额度
+     *  反复授满（v2.0.2 日志确证：计数归零 + 预算重授 = 用户看到的
+     *  "从头再扫"） */
     private static final int CASCADE_BATCH_SIZE = 100;
     /** 在途请求无推进响应视为丢失的时限（网络回源单程可达数秒，过短会误判重发） */
     private static final long CASCADE_STALE_MS = 4000;
-    /** 看门狗连续重发上限（响应全丢也最多再撑 40 × 4s） */
-    private static final int WATCHDOG_MAX_REFIRES = 40;
+    /** 看门狗连续重发上限。曾为 40（160s）：压栈僵尸实例的请求永远得不到
+     *  推进响应，只能烧满预算自灭，期间叠加成请求风暴（v2.0.2 前夜实测
+     *  9 条并发僵尸链）；真实丢包恢复 2-3 次重发足够，8 次已很宽裕 */
+    private static final int WATCHDOG_MAX_REFIRES = 8;
 
     /** classGuid → 本链已推进批次数（额度；classGuid 每 ChatActivity 实例唯一） */
     private static final ConcurrentHashMap<Integer, Integer> cascadeCount =
@@ -276,12 +284,26 @@ public class KeywordFilterHook {
     /** classGuid → 级联期间累计达标行数（进度徽标显示用） */
     private static final ConcurrentHashMap<Integer, Integer> cascadeFound =
             new ConcurrentHashMap<>();
+    /** 最近一个推进级联的 ChatActivity 实例（弱引用）。压栈旧实例的请求
+     *  得不到推进响应（僵尸链形态），看门狗据此让位终止 */
+    private static volatile java.lang.ref.WeakReference<Object> cascadeActiveActivity;
+
+    /** 把批次的最老消息 id 并入锚点（merge min，只降不升） */
+    private static void noteSeenAnchor(int guid, List<?> arr) {
+        int batchMin = oldestPositiveMessageId(arr);
+        if (batchMin <= 0) return;
+        oldestSeenAnchor.merge(guid, batchMin, Math::min);
+        if (oldestSeenAnchor.size() > 200) oldestSeenAnchor.clear();
+    }
 
     /**
-     * 零过滤的健康批次：真实行数充足时重置额度/看门狗/终点提示（与
-     * maybeCascade 内的健康分支同语义）。锚点 oldestSeenAnchor 不重置：
-     * 它记录的是"本实例见过的最老消息"，健康期同样有效——重置会让
-     * TG 空视图随后重取的最新窗口以 prev==null 身份重新推进锚点，
+     * 零过滤的健康批次（与 maybeCascade 内的健康分支同语义）：
+     * 解除单飞、续期看门狗、撤下检索徽标、批次范围并入锚点。
+     * 额度/达标累计/终点提示一律保留——v2.0.2 之前这里全清，
+     * 交替出现的健康/滤空批次把额度反复授满、徽章进度反复归零
+     * （用户看到的"从头再扫"）。
+     * 锚点只 merge min 不重置的原因：它记录"本实例见过的最老消息"，
+     * 重置会让 TG 空视图随后重取的最新窗口以 prev==null 身份重新推进，
      * 把已扫描的整段历史重扫一遍。
      */
     private static void resetCascadeIfHealthy(Object chatActivity, List<?> arr) {
@@ -296,12 +318,10 @@ public class KeywordFilterHook {
                     guidObj = getIntFieldValue(chatActivity.getClass(), chatActivity, "classGuid");
                 } catch (Throwable ignored) {}
                 if (guidObj != null && guidObj != 0) {
-                    cascadeCount.remove(guidObj);
                     cascadeInFlightAt.remove(guidObj);
                     watchdogFires.remove(guidObj);
-                    terminalNotified.remove(guidObj);
-                    cascadeFound.remove(guidObj);
                     removeCascadeBadge(); // 健康批次到达即撤下检索徽标
+                    noteSeenAnchor(guidObj, arr);
                 }
             }
         } catch (Throwable ignored) {}
@@ -325,13 +345,18 @@ public class KeywordFilterHook {
                 } catch (Throwable ignored) {}
             }
             if (realRows >= CASCADE_MIN_ROWS) {
-                // 内容健康，重置额度/看门狗/终点提示（锚点保留，见 resetCascadeIfHealthy）
-                cascadeCount.remove(guidObj);
+                // 内容健康 → 链休眠（撤徽标），但额度/达标累计/终点提示保留：
+                // 用户上滑的原生回包常混有健康批次，全清会让下一个全滤空批次
+                // 以 #1 重启、额度重新授满、徽章进度归零（v2.0.2 日志确证的
+                // "500/深度 → 100/深度 从头再扫"）。锚点同样并入本批范围。
                 cascadeInFlightAt.remove(guidObj);
                 watchdogFires.remove(guidObj);
-                terminalNotified.remove(guidObj);
-                cascadeFound.remove(guidObj);
                 removeCascadeBadge();
+                noteSeenAnchor(guidObj, originalArr);
+                if (config.isDebugLog()) {
+                    module.log(Log.INFO, TAG, "Cascade paused: healthy batch "
+                            + realRows + " rows (dialog=" + notifArgs[0] + ")");
+                }
                 return;
             }
             if (isEnd) { // 历史已到底，确实没有达标消息
@@ -378,8 +403,8 @@ public class KeywordFilterHook {
             if (n > maxBatches) {
                 removeCascadeBadge();
                 notifyTerminalOnce(guidObj, chatActivity, module, notifArgs,
-                        "已连续筛选约" + ReactionsRule.formatDepth(depth)
-                                + "条历史仍未发现达标消息，已停止自动加载"
+                        "已自动筛选约" + ReactionsRule.formatDepth(depth)
+                                + "条历史仍未发现足够达标消息，已停止自动加载"
                                 + "（深度可在频道内 ⚡表情过滤 或 TGClean App 设置中调大）");
                 return;
             }
@@ -394,6 +419,10 @@ public class KeywordFilterHook {
                     + ReactionsRule.formatDepth(n * CASCADE_BATCH_SIZE) + "/"
                     + ReactionsRule.formatDepth(maxBatches * CASCADE_BATCH_SIZE)
                     + (found > 0 ? " · 达标 " + found + " 条" : ""), true);
+            // 推进且即将开火才算"现任"（terminal 链不占用身份）；压栈旧实例
+            // 的看门狗据此软让位（审计 v2.0.2 B-1：写在这里避免额度耗尽的
+            // 实例抢占现任、误停前台链的看门狗）
+            cascadeActiveActivity = new java.lang.ref.WeakReference<>(chatActivity);
             fireCascade(chatActivity, module, dialogId, (Integer) notifArgs[14],
                     guid, frontier, n, realRows);
         } catch (Throwable t) {
@@ -448,6 +477,20 @@ public class KeywordFilterHook {
                 clearCascadeState(guid);
                 module.log(Log.INFO, TAG, "Cascade chain dropped (guid regenerated)"
                         + " dialog=" + dialogId);
+                return;
+            }
+            Object active = cascadeActiveActivity == null ? null : cascadeActiveActivity.get();
+            if (active != null && active != chatActivity) {
+                // 另一 ChatActivity 实例已开火级联（用户切到别的频道）：本实例已被
+                // 压栈，其请求大概率不再得到推进响应（实测僵尸链形态）。软让位：
+                // 只解除单飞+停看门狗（不再 re-post 即停摆），额度/锚点/达标/终点
+                // 全保留——返回本频道后下一个推进批次无损续链。硬清会让快速
+                // A→B→A 往返复现"进度归零从头再扫"（审计 v2.0.2 B-1）；真正的
+                // 僵尸（永无推进）由预算 8 次封顶自灭，治理目标不受损。
+                cascadeInFlightAt.remove(guid);
+                watchdogFires.remove(guid);
+                module.log(Log.INFO, TAG, "Cascade chain yielded (superseded by"
+                        + " foreground chat) dialog=" + dialogId + ", state preserved");
                 return;
             }
             Integer anchorObj = oldestSeenAnchor.get(guid);

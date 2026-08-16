@@ -3,8 +3,8 @@
 ## 项目状态
 - **仓库**: https://github.com/qxxwwyy/TGClean
 - **正式版本**: v1.0.0、v2.0.0（tag 触发 release.yml，APK 直传 Release）
-- **开发分支**: `feature/in-app-ui`（PR #1，合并进 main 后发布）
-- **当前测试版本**: v2.0.1（弹窗 Spinner 瘦身/详情页频道折叠/徽标置顶+压制TG加载圈，versionCode 19）
+- **开发分支**: `feature/in-app-ui`（PR #2 开放中，等用户验证后合并 main）
+- **当前测试版本**: v2.0.2（级联额度单调化修复"从头再扫"/僵尸链治理/深度默认500+自定义输入，versionCode 20）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
@@ -111,11 +111,12 @@ app/src/main/res/layout/
 9. **ContentProvider 方案已废弃**（Android 11+ resolveContentProvider 返回 NULL）
 10. **过滤不做跨实例去重**（v16）：同一 TL 消息会多次构造 MessageObject（通知预览/会话列表/聊天窗口），按 (dialogId,msgId) 去重跳过标记会导致打开频道时漏过滤"复活"，每实例独立评估
 11. **每频道表情过滤**（v17，取代旧全局 reactions）：白名单模式只显示达标消息（如 ❤️≥10 且 👎≤20），黑名单模式隐藏达标消息；在 TG 频道菜单直接配置（headerItem 注入 ⚡ 项 + framework AlertDialog 弹窗 + 表情快速选择行），保存经显式广播 → ChannelReceiver → RemoteConfigStore（服务未就绪排队）写 remote prefs → 框架实时推送回 TG 进程热更新；匹配基于 TL_reactionEmoji.emoticon 字符串精确相等，自定义表情(document_id)/付费星星无法匹配
-12. **检索深度两级配置**（v29）：筛选后剩行过少时级联自动向前翻找的消息条数上限。全局默认存 remote prefs `reactions_search_depth`（App 设置页 ⚡表情筛选 卡片，App 端 FilterConfigWriter 写 / hook 端 FilterConfig 读）；每频道覆盖存规则 JSON 字段 `maxDepth`（0=跟随默认，TG 内 ⚡弹窗单选行）。预设 {5千,1万,1.5万,3万,5万}，默认 1.5万；额度=深度/批大小(100) 动态计算。频道启用表情规则且设了深度时，该频道一切级联（含关键词触发的）都按频道深度；无规则/未启用时用全局默认
+12. **检索深度两级配置**（v29）：筛选后剩行过少时级联自动向前翻找的消息条数上限。全局默认存 remote prefs `reactions_search_depth`（App 设置页 ⚡表情筛选 卡片，App 端 FilterConfigWriter 写 / hook 端 FilterConfig 读）；每频道覆盖存规则 JSON 字段 `maxDepth`（0=跟随默认，TG 内 ⚡弹窗单选行）。预设 {500,1000,2000,5000,1万}+自定义输入（钳制 100~10万，v2.0.2），默认 500（级联迭代修复后 500 已够用，深度直接决定流量与缓存占用）；额度=深度/批大小(100) 动态计算。频道启用表情规则且设了深度时，该频道一切级联（含关键词触发的）都按频道深度；无规则/未启用时用全局默认
 13. **写通道配对令牌**（v2.0.0）：App 端 FilterConfigWriter.ensurePairingToken() 首次生成 UUID 写 remote prefs（框架数据目录，第三方不可读）；TG 侧 FilterConfig 只读后随保存广播 `token` extra 带回，写 op 内比对一致才落盘，防任意 App 伪造 intent 改写规则；首次保存（令牌刚生成、推送未达 TG）信任首次。回执另带一次性 `nonce` 防伪，TG 侧菜单标题在回执确认后才更新
 14. **调试日志默认关**（v2.0.0，remote prefs `debug_log`）：FILTERED 逐条明细（含消息预览）、RX-DEBUG、启动关键词 dump 仅在开启时输出，用户通信内容不进 LSPosed 日志；批量摘要始终保留
 15. **无"保存"按钮**（v2.0.0）：全 App 即改即存（remote prefs 实时推送架构下保存是伪概念），总开关拨动即写 + Snackbar 反馈；否则 100+ 频道时按钮沉底要滑很久
 16. **频道列表默认折叠 10 条**（v2.0.0）：超过 10 条显示"显示全部 N 个频道"footer；搜索自动展开、清空恢复折叠；搜索 200ms 防抖 + 数据缓存内存过滤（不重复解析 JSON）
+17. **级联额度实例内单调**（v2.0.2，日志确证的"从头再扫"根因）：健康批次（存活行≥5，多为用户上滑的原生回包）只休眠链（解除单飞+撤徽标+锚点 merge min），不清 cascadeCount/cascadeFound/terminalNotified——全清会让交替健康/滤空批次反复授满额度、徽章进度归零重启（用户观感 500/深度→100/深度 重扫）。僵尸链治理：看门狗预算 40→8（压栈实例请求永无推进响应，只能烧满预算自灭）+ cascadeActiveActivity 弱引用记录现任开火实例（terminal 链不占用身份），旧实例看门狗软让位（只解除单飞/停 re-post，状态全保留，回频道可无损续链——硬清会让快速 A→B→A 复现进度归零，审计 v2.0.2 B-1）。已知局限：重进频道产生新 classGuid，前沿不跨实例继承（缓存内重滤、开销可接受，dialogId 键迁移有跨实例污染/空视图死锁风险，暂不做）
 
 ## 发布规则
 - **只有用户明确说明"正式版本"时才发布 GitHub Release**

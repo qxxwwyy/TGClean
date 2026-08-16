@@ -400,24 +400,63 @@ public class SettingsActivity extends AppCompatActivity {
             return;
         }
         int current = writer.getReactionsSearchDepth();
-        String[] labels = new String[ReactionsRule.DEPTH_PRESETS.length];
-        int checked = 0;
-        for (int i = 0; i < labels.length; i++) {
+        // 末位固定为“自定义…”：非预设值（如旧版存的 15000）也落在这档
+        final int customIdx = ReactionsRule.DEPTH_PRESETS.length;
+        String[] labels = new String[customIdx + 1];
+        int checked = customIdx;
+        for (int i = 0; i < customIdx; i++) {
             labels[i] = ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]) + " 条";
             if (ReactionsRule.DEPTH_PRESETS[i] == current) checked = i;
         }
+        labels[customIdx] = current > 0 && checked == customIdx
+                ? "自定义（当前 " + ReactionsRule.formatDepth(current) + " 条）" : "自定义…";
         final int[] selected = {checked};
         new MaterialAlertDialogBuilder(this)
                 .setTitle("默认检索深度")
                 .setSingleChoiceItems(labels, checked, (d, which) -> selected[0] = which)
                 .setPositiveButton("确定", (d, which) -> {
-                    int depth = ReactionsRule.DEPTH_PRESETS[selected[0]];
-                    writer.setReactionsSearchDepth(depth);
-                    rowSearchDepth.setText(ReactionsRule.formatDepth(depth) + " 条 ›");
-                    Snackbar.make(getRoot(), "已保存，Telegram 内立即生效", Snackbar.LENGTH_SHORT).show();
+                    if (selected[0] == customIdx) {
+                        promptCustomDepth(current);
+                    } else {
+                        applyDepth(ReactionsRule.DEPTH_PRESETS[selected[0]]);
+                    }
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    /** 自定义深度输入：钳制到 [MIN_DEPTH, MAX_DEPTH] 后保存 */
+    private void promptCustomDepth(int prefill) {
+        EditText input = new EditText(this);
+        input.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        input.setText(prefill > 0 ? String.valueOf(prefill) : "");
+        input.setHint(ReactionsRule.MIN_DEPTH + " ~ " + ReactionsRule.formatDepth(ReactionsRule.MAX_DEPTH));
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("自定义检索深度（条）")
+                .setView(input)
+                .setPositiveButton("确定", (d, which) -> {
+                    String t = input.getText().toString().trim();
+                    int v;
+                    try {
+                        v = Integer.parseInt(t);
+                    } catch (NumberFormatException e) {
+                        // 超 int 范围的纯数字按上限钳制，非数字才报错（审计 A-2）
+                        v = t.matches("\\d{10,}") ? ReactionsRule.MAX_DEPTH : -1;
+                    }
+                    if (v <= 0) {
+                        Snackbar.make(getRoot(), "请输入正整数", Snackbar.LENGTH_SHORT).show();
+                        return;
+                    }
+                    applyDepth(ReactionsRule.clampDepth(v));
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void applyDepth(int depth) {
+        writer.setReactionsSearchDepth(depth);
+        rowSearchDepth.setText(ReactionsRule.formatDepth(depth) + " 条 ›");
+        Snackbar.make(getRoot(), "已保存，Telegram 内立即生效", Snackbar.LENGTH_SHORT).show();
     }
 
     // ═════════════════════════════════════════════

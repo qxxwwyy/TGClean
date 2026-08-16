@@ -24,9 +24,20 @@ package com.tgclean.config;
  */
 public class ReactionsRule {
     /** 检索深度预设（条）：弹窗/App 快速选择用 */
-    public static final int[] DEPTH_PRESETS = {5000, 10000, 15000, 30000, 50000};
-    /** 全局默认检索深度（条）：未单独设置的频道与关键词过滤路径共用 */
-    public static final int DEFAULT_MAX_DEPTH = 15000;
+    public static final int[] DEPTH_PRESETS = {500, 1000, 2000, 5000, 10000};
+    /** 全局默认检索深度（条）：未单独设置的频道与关键词过滤路径共用。
+     *  v2.0.2 从 15000 下调：级联迭代修复后 500 条已能覆盖多数频道，
+     *  深度上限直接决定网络流量与消息缓存占用，默认值取保守档 */
+    public static final int DEFAULT_MAX_DEPTH = 500;
+    /** 自定义深度输入的合法区间（条） */
+    public static final int MIN_DEPTH = 100;
+    public static final int MAX_DEPTH = 100000;
+
+    /** 自定义深度钳制：越界值收到边界，非法（≤0）返回 0（= 跟随全局默认） */
+    public static int clampDepth(int v) {
+        if (v <= 0) return 0;
+        return Math.max(MIN_DEPTH, Math.min(MAX_DEPTH, v));
+    }
 
     public boolean enabled;
     public boolean whitelistMode;
@@ -52,7 +63,7 @@ public class ReactionsRule {
         if (emoji2.codePointCount(0, emoji2.length()) > 16) emoji2 = "";
         if (minCount < 0) minCount = 0;
         if (maxCount < 0) maxCount = 0;
-        if (maxDepth < 0) maxDepth = 0;
+        maxDepth = clampDepth(maxDepth);
     }
 
     /** 菜单/徽标用的简短描述，如 "❤️≥10·👎≤20·白" */
