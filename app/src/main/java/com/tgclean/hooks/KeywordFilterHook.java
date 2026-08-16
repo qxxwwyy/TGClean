@@ -535,6 +535,7 @@ public class KeywordFilterHook {
                             chatActivity.getClass(), chatActivity, "classGuid");
                     if (guid != null && guid != 0) {
                         clearCascadeState(guid);
+                        restoreTgProgress(); // 压制解除兜底（removeCascadeBadge 主路径之外）
                     }
                 } catch (Throwable ignored) {}
                 return null;
@@ -584,6 +585,46 @@ public class KeywordFilterHook {
     private static android.view.ViewGroup badgeHost;
     private static Runnable badgeAutoHide;
 
+    /** ChatActivity.progressView（TG 空视图加载时的全屏转圈层，用户反馈方向误导） */
+    private static volatile Field fProgressView;
+    /** 压制过 progressView 的实例（弱引用：恢复时不阻止 GC） */
+    private static java.lang.ref.WeakReference<Object> cascadeProgressOwner;
+
+    /**
+     * 级联检索期间压制 TG 自身的加载圈：历史消息从顶部方向进入，底部转圈
+     * 会让用户误以为在等新消息。进度反馈统一由顶部徽标承担。
+     */
+    private static void suppressTgProgress(Object chatActivity) {
+        try {
+            if (fProgressView == null) {
+                Field f = findFieldInHierarchy(chatActivity.getClass(), "progressView");
+                if (f == null) return;
+                f.setAccessible(true);
+                fProgressView = f;
+            }
+            Object pv = fProgressView.get(chatActivity);
+            if (pv instanceof android.view.View) {
+                ((android.view.View) pv).setVisibility(android.view.View.GONE);
+            }
+            cascadeProgressOwner = new java.lang.ref.WeakReference<>(chatActivity);
+        } catch (Throwable ignored) {}
+    }
+
+    /** 恢复 TG 加载圈到构造默认态（INVISIBLE；TG 需要时会自行置 VISIBLE） */
+    private static void restoreTgProgress() {
+        java.lang.ref.WeakReference<Object> ref = cascadeProgressOwner;
+        cascadeProgressOwner = null;
+        if (ref == null) return;
+        Object ca = ref.get();
+        if (ca == null || fProgressView == null) return;
+        try {
+            Object pv = fProgressView.get(ca);
+            if (pv instanceof android.view.View) {
+                ((android.view.View) pv).setVisibility(android.view.View.INVISIBLE);
+            }
+        } catch (Throwable ignored) {}
+    }
+
     private static void updateCascadeBadge(Object chatActivity, String text, boolean autoHide) {
         try {
             if (fGetContext == null) {
@@ -594,11 +635,12 @@ public class KeywordFilterHook {
             android.view.ViewGroup content =
                     ((android.app.Activity) ctxObj).findViewById(android.R.id.content);
             if (content == null) return;
+            suppressTgProgress(chatActivity);
 
             if (cascadeBadge == null || badgeHost != content) {
                 removeCascadeBadge();
                 android.widget.TextView badge = new android.widget.TextView(content.getContext());
-                badge.setTextSize(12);
+                badge.setTextSize(13);
                 badge.setTextColor(0xFFFFFFFF);
                 float density = content.getResources().getDisplayMetrics().density;
                 int padH = (int) (12 * density + 0.5f);
@@ -609,12 +651,15 @@ public class KeywordFilterHook {
                 bg.setColor(0xCC2B2B2B); // 半透明深色，明暗主题下均可读
                 bg.setCornerRadius(16 * density);
                 badge.setBackground(bg);
+                // 顶部居中：级联加载的是更早的历史消息（视觉上从顶部进入），
+                // 进度指示放顶部符合方向心智；TG 自身的底部加载圈会被临时
+                // 压制（suppressTgProgress），避免"加载方向"误导
                 android.widget.FrameLayout.LayoutParams lp =
                         new android.widget.FrameLayout.LayoutParams(
                                 android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
                                 android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
-                                android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL);
-                lp.bottomMargin = (int) (48 * density + 0.5f);
+                                android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL);
+                lp.topMargin = (int) (64 * density + 0.5f);
                 content.addView(badge, lp);
                 cascadeBadge = badge;
                 badgeHost = content;
@@ -632,6 +677,8 @@ public class KeywordFilterHook {
     }
 
     private static void removeCascadeBadge() {
+        // 徽标撤下 = 检索结束/中断，同步恢复 TG 自身加载圈的默认态
+        restoreTgProgress();
         try {
             // 先撤销已排定的自动隐藏，防止陈旧 runnable 误撤后续新徽标（审计 v30-M2）
             if (badgeHost != null && badgeAutoHide != null) {

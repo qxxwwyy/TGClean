@@ -403,21 +403,38 @@ public class ChatHelperHook {
         root.addView(editMax);
 
         // ── 检索深度（级联自动向前翻找范围）──
+        // 单行 Spinner：6 个纵向单选曾把弹窗撑到按钮栏被挤出可视区
+        // （用户实测"保存按钮没了"），下拉选择一行搞定
         root.addView(sectionLabel(context, "检索深度（筛选后剩太少时，自动向前翻找的范围）"));
         int globalDepth = config.getReactionsSearchDepth();
-        RadioGroup depthGroup = new RadioGroup(context);
-        // 纵向排布：横向 6 项在窄屏溢出且不可发现（发布前 UX 复核 P1-7）
-        depthGroup.setOrientation(RadioGroup.VERTICAL);
-        RadioButton radioDepthDefault = new RadioButton(context);
-        radioDepthDefault.setText("跟随全局默认（当前 " + ReactionsRule.formatDepth(globalDepth) + " 条）");
-        depthGroup.addView(radioDepthDefault);
-        final RadioButton[] depthButtons = new RadioButton[ReactionsRule.DEPTH_PRESETS.length];
+        final String[] depthChoices = new String[ReactionsRule.DEPTH_PRESETS.length + 1];
+        depthChoices[0] = "跟随全局默认（当前 " + ReactionsRule.formatDepth(globalDepth) + " 条）";
         for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
-            depthButtons[i] = new RadioButton(context);
-            depthButtons[i].setText(ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]) + " 条");
-            depthGroup.addView(depthButtons[i]);
+            depthChoices[i + 1] = ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]) + " 条";
         }
-        root.addView(depthGroup);
+        final int[] selectedDepth = {0}; // 下标 0 = 跟随默认 → maxDepth 0
+        android.widget.Spinner depthSpinner = new android.widget.Spinner(context);
+        android.widget.ArrayAdapter<String> depthAdapter = new android.widget.ArrayAdapter<>(
+                context, android.R.layout.simple_spinner_item, depthChoices);
+        depthAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        depthSpinner.setAdapter(depthAdapter);
+        depthSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> p, View v, int pos, long id) {
+                selectedDepth[0] = pos;
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> p) {}
+        });
+        int presetIdx = 0; // 预填：规则深度匹配预设则选中对应项，否则跟随默认
+        if (current != null) {
+            for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
+                if (ReactionsRule.DEPTH_PRESETS[i] == current.maxDepth) {
+                    presetIdx = i + 1;
+                    break;
+                }
+            }
+        }
+        depthSpinner.setSelection(presetIdx);
+        root.addView(depthSpinner);
 
         TextView hint = new TextView(context);
         hint.setText("提示：建议用快速选择以确保表情编码匹配（生效时机见保存后的提示）");
@@ -439,19 +456,6 @@ public class ChatHelperHook {
             editMin.setText("10");
             editMax.setText("20");
         }
-
-        // 检索深度预填：未设置(maxDepth=0)或值不在预设内 → 跟随默认
-        boolean depthMatched = false;
-        if (current != null) {
-            for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
-                if (ReactionsRule.DEPTH_PRESETS[i] == current.maxDepth) {
-                    depthButtons[i].setChecked(true);
-                    depthMatched = true;
-                    break;
-                }
-            }
-        }
-        if (!depthMatched) radioDepthDefault.setChecked(true);
 
         // 模式切换时启停负面表情区
         final View[] section2 = {label2, editEmoji2, editMax, row2};
@@ -510,13 +514,8 @@ public class ChatHelperHook {
                     }
                 }
 
-                int maxDepth = 0; // 0 = 跟随全局默认
-                for (int i = 0; i < depthButtons.length; i++) {
-                    if (depthButtons[i].isChecked()) {
-                        maxDepth = ReactionsRule.DEPTH_PRESETS[i];
-                        break;
-                    }
-                }
+                int maxDepth = selectedDepth[0] > 0
+                        ? ReactionsRule.DEPTH_PRESETS[selectedDepth[0] - 1] : 0; // 0 = 跟随全局默认
 
                 // 令牌随写请求带回 App 端校验（防伪造，审计 M-1）；
                 // nonce 供回执防伪 + 菜单标题在回执确认后才更新（UX 复核 P1-8）

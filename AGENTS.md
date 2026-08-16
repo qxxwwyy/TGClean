@@ -4,7 +4,7 @@
 - **仓库**: https://github.com/qxxwwyy/TGClean
 - **正式版本**: v1.0.0、v2.0.0（tag 触发 release.yml，APK 直传 Release）
 - **开发分支**: `feature/in-app-ui`（PR #1，合并进 main 后发布）
-- **当前测试版本**: v2.0.0（三路复核修复：死循环/僵尸链/等待层/即时保存/折叠列表/token 防伪，versionCode 18）
+- **当前测试版本**: v2.0.1（弹窗 Spinner 瘦身/详情页频道折叠/徽标置顶+压制TG加载圈，versionCode 19）
 - **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 

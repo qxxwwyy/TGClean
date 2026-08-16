@@ -66,6 +66,7 @@ public class RuleSetDetailActivity extends AppCompatActivity {
     private FilterConfigWriter.RuleSetData currentRuleSet = null;
     private Set<Long> currentChannels = new HashSet<>();
     private List<ChannelItem> allChannels = new ArrayList<>();
+    private String lastChannelQuery = "";
 
     // ─── 控件 ───
     private MaterialToolbar toolbar;
@@ -330,7 +331,7 @@ public class RuleSetDetailActivity extends AppCompatActivity {
 
     private void updateChannelCount() {
         if (textChannelCount != null) {
-            textChannelCount.setText(currentChannels.size() + " 个频道");
+            textChannelCount.setText("已选 " + currentChannels.size() + " / " + allChannels.size() + " 个频道");
         }
     }
 
@@ -423,16 +424,22 @@ public class RuleSetDetailActivity extends AppCompatActivity {
         }
     }
 
-    class ChannelCheckAdapter extends RecyclerView.Adapter<ChannelCheckAdapter.ViewHolder> {
+    class ChannelCheckAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
+        private static final int TYPE_ITEM = 0;
+        private static final int TYPE_FOOTER = 1;
+        /** 超过此数量折叠 + "显示全部"footer：1000+ 频道全量罗列既卡又难用（用户反馈） */
+        private static final int COLLAPSED_COUNT = 15;
+
         private final List<ChannelItem> allItems = new ArrayList<>();
         private final List<ChannelItem> filteredItems = new ArrayList<>();
         private Set<Long> checkedChannels = new HashSet<>();
+        private boolean expanded = false;
 
         void submitList(List<ChannelItem> items, Set<Long> checked) {
             allItems.clear();
             allItems.addAll(items);
             checkedChannels = new HashSet<>(checked);
-            applyFilter("");
+            applyFilter(lastChannelQuery);
         }
 
         void setCheckedChannels(Set<Long> checked) {
@@ -441,18 +448,20 @@ public class RuleSetDetailActivity extends AppCompatActivity {
         }
 
         void filter(String query) {
+            expanded = !query.isEmpty(); // 搜索即展开，清空恢复折叠
             applyFilter(query);
         }
 
         private void applyFilter(String query) {
+            lastChannelQuery = query != null ? query : "";
             filteredItems.clear();
-            String lowerQuery = query.toLowerCase();
+            String lowerQuery = lastChannelQuery.toLowerCase();
             for (ChannelItem ch : allItems) {
-                if (query.isEmpty()) {
+                if (lastChannelQuery.isEmpty()) {
                     filteredItems.add(ch);
                 } else {
                     if (ch.name.toLowerCase().contains(lowerQuery)
-                            || String.valueOf(ch.id).contains(query)) {
+                            || String.valueOf(ch.id).contains(lastChannelQuery)) {
                         filteredItems.add(ch);
                     }
                 }
@@ -460,41 +469,77 @@ public class RuleSetDetailActivity extends AppCompatActivity {
             notifyDataSetChanged();
         }
 
+        private boolean needFooter() {
+            return filteredItems.size() > COLLAPSED_COUNT;
+        }
+
+        private int visibleCount() {
+            return (expanded || !needFooter()) ? filteredItems.size()
+                    : Math.min(COLLAPSED_COUNT, filteredItems.size());
+        }
+
+        @Override public int getItemCount() {
+            int n = visibleCount();
+            return needFooter() ? n + 1 : n;
+        }
+
+        @Override public int getItemViewType(int position) {
+            return (needFooter() && position == getItemCount() - 1) ? TYPE_FOOTER : TYPE_ITEM;
+        }
+
         @NonNull @Override
-        public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+        public RecyclerView.ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
+            if (viewType == TYPE_FOOTER) {
+                View view = LayoutInflater.from(parent.getContext())
+                        .inflate(R.layout.item_show_all, parent, false);
+                return new FooterHolder(view);
+            }
             View view = LayoutInflater.from(parent.getContext())
                     .inflate(R.layout.item_channel_checkbox, parent, false);
             return new ViewHolder(view);
         }
 
         @Override
-        public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
+        public void onBindViewHolder(@NonNull RecyclerView.ViewHolder holder, int position) {
+            if (holder instanceof FooterHolder) {
+                FooterHolder fh = (FooterHolder) holder;
+                fh.btnShowAll.setText(expanded ? "收起" : "显示全部 " + filteredItems.size() + " 个频道");
+                fh.btnShowAll.setOnClickListener(v -> {
+                    expanded = !expanded;
+                    notifyDataSetChanged();
+                });
+                return;
+            }
             ChannelItem ch = filteredItems.get(position);
-            holder.textName.setText(ch.name);
-            holder.textId.setText(String.valueOf(ch.id));
+            ViewHolder vh = (ViewHolder) holder;
+            vh.textName.setText(ch.name);
+            vh.textId.setText(String.valueOf(ch.id));
 
             // 阻止 checkbox 触发 item 点击的递归
-            holder.checkbox.setOnCheckedChangeListener(null);
-            holder.checkbox.setChecked(checkedChannels.contains(ch.id));
-            holder.checkbox.setOnCheckedChangeListener((btn, checked) -> {
-                if (writer == null) return;
+            vh.checkbox.setOnCheckedChangeListener(null);
+            vh.checkbox.setChecked(checkedChannels.contains(ch.id));
+            vh.checkbox.setOnCheckedChangeListener((btn, checked) -> {
+                if (writer == null) {
+                    notifyNotReady();
+                    return;
+                }
                 if (checked) {
                     checkedChannels.add(ch.id);
+                    currentChannels.add(ch.id); // 同步 activity 侧计数源（审计 v2.0.1-1）
                 } else {
                     checkedChannels.remove(ch.id);
+                    currentChannels.remove(ch.id);
                 }
                 writer.setRuleSetChannels(ruleSetId, checkedChannels);
                 updateChannelCount();
             });
 
             // 点击整行也切换
-            holder.itemView.setOnClickListener(v -> {
-                boolean newState = !holder.checkbox.isChecked();
-                holder.checkbox.setChecked(newState);
+            vh.itemView.setOnClickListener(v -> {
+                boolean newState = !vh.checkbox.isChecked();
+                vh.checkbox.setChecked(newState);
             });
         }
-
-        @Override public int getItemCount() { return filteredItems.size(); }
 
         class ViewHolder extends RecyclerView.ViewHolder {
             MaterialCheckBox checkbox;
@@ -505,6 +550,15 @@ public class RuleSetDetailActivity extends AppCompatActivity {
                 checkbox = itemView.findViewById(R.id.checkbox_channel);
                 textName = itemView.findViewById(R.id.text_channel_name);
                 textId = itemView.findViewById(R.id.text_channel_id);
+            }
+        }
+
+        class FooterHolder extends RecyclerView.ViewHolder {
+            final android.widget.Button btnShowAll;
+
+            FooterHolder(View itemView) {
+                super(itemView);
+                btnShowAll = itemView.findViewById(R.id.btn_show_all);
             }
         }
     }
