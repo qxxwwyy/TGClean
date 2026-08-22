@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 启动图标前景：盾牌 + 对勾（清滤守护），108dp 自适应图标画布，
+     图形控制在中心 66dp 安全区内 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 盾牌轮廓 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,30 L72,37.5 V50 C72,61.5 64.4,69.9 54,74 C43.6,69.9 36,61.5 36,50 V37.5 Z" />
+
+    <!-- 对勾（挖空色 = 背景色） -->
+    <path
+        android:fillColor="#4A90D9"
+        android:pathData="M47.5,51.5 L52.5,56.5 L61.5,44.5 L64.5,46.8 L52.5,62.8 L44.8,54 Z" />
+</vector>

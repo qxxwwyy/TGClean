@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:name=".App"
+        android:label="@string/app_name"
+        android:description="@string/app_description"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/Theme.TGClean">
+
+        <activity
+            android:name=".ui.SettingsActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".ui.RuleSetDetailActivity"
+            android:exported="false"
+            android:parentActivityName=".ui.SettingsActivity" />
+
+        <!--
+            规则写入兜底通道：MIUI 等自启动管理拦截"广播拉起进程"，
+            前台应用 startActivity 不受限。透明无界面，写入后自退。
+        -->
+        <activity
+            android:name=".ui.WriteConfigActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:noHistory="true"
+            android:excludeFromRecents="true"
+            android:taskAffinity="" />
+
+        <receiver
+            android:name=".receiver.ChannelReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.tgclean.ACTION_CHANNEL_DISCOVERED" />
+                <action android:name="com.tgclean.ACTION_REACTIONS_RULE" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+</manifest>

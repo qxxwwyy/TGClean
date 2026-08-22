@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">TGClean</string>
+    <string name="app_description">Telegram keyword ad filter with per-channel rules</string>
+
+    <!-- 总开关 -->
+    <string name="filter_enabled">启用过滤</string>
+    <string name="filter_enabled_desc">关闭后所有过滤功能将停止工作（拨动即生效，无需保存）</string>
+
+    <!-- LSPosed 服务等待层 -->
+    <string name="waiting_service">正在连接 LSPosed 服务…</string>
+    <string name="waiting_service_timeout">未连接到 LSPosed 服务。请依次检查：\n1. 已安装支持 libxposed API 101 的 LSPosed\n2. 已在 LSPosed 中启用 TGClean 模块\n3. 作用域已勾选 Telegram\n4. 强制重启 Telegram 和 TGClean 后点「重试」</string>
+    <string name="retry">重试</string>
+</resources>

@@ -1,0 +1,44 @@
+name: Build TGClean APK
+
+on:
+  push:
+    branches: [ main ]
+    paths-ignore: [ '**.md', '.gitignore' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
+
+      # R8 minify + shrinkResources + 签名路径与正式发布完全一致，逐次验证
+      - name: Build Release APK
+        run: ./gradlew assembleRelease
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TGClean-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: TGClean-release
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error

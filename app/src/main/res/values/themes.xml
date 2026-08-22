@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material 3 浅色主题 — 使用Material内置颜色映射，不自定义background/surface -->
+    <style name="Theme.TGClean" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#4A90D9</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorPrimaryContainer">#D1E4FF</item>
+        <item name="colorOnPrimaryContainer">#001D36</item>
+        <item name="colorSecondary">#535F70</item>
+        <item name="colorOnSecondary">#FFFFFF</item>
+        <item name="colorSecondaryContainer">#D7E3F7</item>
+        <item name="colorOnSecondaryContainer">#101C2B</item>
+        <item name="colorTertiary">#6B5778</item>
+        <item name="colorOnTertiary">#FFFFFF</item>
+        <item name="colorTertiaryContainer">#F2DAFF</item>
+        <item name="colorOnTertiaryContainer">#251431</item>
+    </style>
+</resources>

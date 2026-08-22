@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Material 3 深色主题 — 覆盖dark variant -->
+    <bool name="is_light_theme">false</bool>
+
+    <style name="Theme.TGClean" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">#A1C9FF</item>
+        <item name="colorOnPrimary">#00315B</item>
+        <item name="colorPrimaryContainer">#004882</item>
+        <item name="colorOnPrimaryContainer">#D1E4FF</item>
+        <item name="colorSecondary">#BBC7DB</item>
+        <item name="colorOnSecondary">#253141</item>
+        <item name="colorSecondaryContainer">#3C4858</item>
+        <item name="colorOnSecondaryContainer">#D7E3F7</item>
+        <item name="colorTertiary">#D6BDE4</item>
+        <item name="colorOnTertiary">#3A2948</item>
+        <item name="colorTertiaryContainer">#513F5F</item>
+        <item name="colorOnTertiaryContainer">#F2DAFF</item>
+    </style>
+</resources>
