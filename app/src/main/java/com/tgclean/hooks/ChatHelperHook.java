@@ -351,7 +351,11 @@ public class ChatHelperHook {
                                                   java.util.function.Consumer<String> titleUpdater) {
         ReactionsRule current = config.getReactionsChannelRules().get(dialogId);
 
-        ScrollView scroll = new ScrollView(context);
+        // 内容高度钳制：framework AlertDialog 给自定义视图的测量上限是整个可用屏高
+        // （不替标题/按钮栏留量），内容一高弹窗就顶满屏幕，底部按钮栏（保存/取消）
+        // 被裁出可视区——小屏/大字体/不同分辨率下复现（2026-09 用户实测）。
+        // 钳到 2/3 屏高并预留标题+消息行+按钮栏后，内容区自身滚动，按钮栏恒可见。
+        ScrollView scroll = new ClampedScrollView(context, maxDialogBodyHeight(context));
         LinearLayout root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
         int pad = dp(context, 16);
@@ -800,6 +804,49 @@ public class ChatHelperHook {
 
     private static int dp(Context context, int value) {
         return (int) (context.getResources().getDisplayMetrics().density * value + 0.5f);
+    }
+
+    // 弹窗内容区最多占屏高比例，与「屏高 − 预留(标题+消息行+按钮栏)」取小
+    private static final float DIALOG_BODY_MAX_SCREEN_RATIO = 2f / 3f;
+
+    private static int maxDialogBodyHeight(Context context) {
+        int screenH = context.getResources().getDisplayMetrics().heightPixels;
+        // 2/3 屏高与「屏高 − 预留 170dp」取小：纯 2/3 比例在横屏/分屏小窗
+        // （屏高 320~420dp）下，1/3 余量（约 110~140dp）盖不住约 130dp 的
+        // 标题+按钮栏，按钮栏仍会被裁 10~35dp
+        int cap = Math.min((int) (screenH * DIALOG_BODY_MAX_SCREEN_RATIO),
+                screenH - dp(context, 170));
+        return Math.max(dp(context, 120), cap);
+    }
+
+    /**
+     * 高度钳制 ScrollView：AOSP 的 AlertController 给自定义视图 AT_MOST(整个可用
+     * 屏高) 的规格（不为标题/按钮栏留量，LinearLayout 也不会收缩子项），内容一高
+     * 按钮栏即被裁；部分 OEM/旧版主题下是 wrap_content 链（UNSPECIFIED）。两种
+     * 规格一律收窄为 AT_MOST(max)；父容器给出更小的限定高度（EXACTLY 或更紧的
+     * AT_MOST，如键盘弹起、分屏）时原样让位。内容不足上限时按内容自然高度显示
+     * （AT_MOST 语义），小弹窗不受影响；ScrollView 以 UNSPECIFIED 测量子项，
+     * 钳制后内部滚动不受影响。
+     */
+    private static final class ClampedScrollView extends ScrollView {
+        private final int maxHeightPx;
+
+        ClampedScrollView(Context context, int maxHeightPx) {
+            super(context);
+            this.maxHeightPx = maxHeightPx;
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            int mode = View.MeasureSpec.getMode(heightMeasureSpec);
+            if (mode == View.MeasureSpec.UNSPECIFIED
+                    || (mode == View.MeasureSpec.AT_MOST
+                    && View.MeasureSpec.getSize(heightMeasureSpec) > maxHeightPx)) {
+                heightMeasureSpec = View.MeasureSpec.makeMeasureSpec(
+                        maxHeightPx, View.MeasureSpec.AT_MOST);
+            }
+            super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+        }
     }
 
     private static Object getHeaderItem(Object chatActivity) {
