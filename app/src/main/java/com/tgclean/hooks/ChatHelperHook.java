@@ -1,7 +1,5 @@
 package com.tgclean.hooks;
 
-import android.content.ClipData;
-import android.content.ClipboardManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -31,7 +29,7 @@ import io.github.libxposed.api.XposedModule;
 /**
  * ChatActivity Hook — 菜单注入 + 频道自动发现
  *
- * 1. 注入「📋 复制聊天ID」「⚡ 表情过滤」菜单项
+ * 1. 注入「⚡ 表情过滤」菜单项
  * 2. 首次 onResume 时一次性扫描 TG 全部频道列表，批量广播到 TGClean App
  * 3. 后续 onResume 只增量更新当前频道
  * 4. 表情过滤：在 TG 内直接为当前频道配置白/黑名单规则（弹窗 + 表情快速选择），
@@ -40,7 +38,6 @@ import io.github.libxposed.api.XposedModule;
 public class ChatHelperHook {
     private static final String TAG = "TGClean-ChatHelper";
 
-    private static final int MENU_ID_COPY_CHAT_ID = 999002;
     private static final int MENU_ID_REACTIONS = 999003;
     private static final int MENU_ID_DIALOGS_REACTIONS = 999004;
     private static final String TAG_INJECTED = "tgclean_injected";
@@ -50,6 +47,11 @@ public class ChatHelperHook {
     // selectedDialogs 读当前选中会话）
     private static volatile Field cachedActionModeViewsField;
     private static volatile Field cachedSelectedDialogsField;
+
+    // App→TG 反向通道：请求清除"已扫描"标记，下一个聊天页 onResume 重扫并
+    // 批量上报（重装/清数据后频道列表为空的恢复通道，见 ensureRescanReceiver）
+    private static final String ACTION_RESCAN_CHANNELS = "com.tgclean.ACTION_RESCAN_CHANNELS";
+    private static volatile boolean rescanReceiverRegistered = false;
 
     // 表情过滤规则广播（TG 进程 → TGClean App 进程）
     private static final String ACTION_REACTIONS_RULE = "com.tgclean.ACTION_REACTIONS_RULE";
@@ -100,6 +102,7 @@ public class ChatHelperHook {
                     ClassLoader tgCl = chatActivity.getClass().getClassLoader();
                     Context context = getActivityContext(chatActivity, tgCl);
                     if (context == null) return null;
+                    ensureRescanReceiver(context); // App→TG 重扫请求通道,尽早可用
 
                     long dialogId = getDialogId(chatActivity, tgCl);
                     if (dialogId == 0) return null;
@@ -309,11 +312,6 @@ public class ChatHelperHook {
             }
             addSubItem.setAccessible(true);
 
-            Object copyItem = addSubItem.invoke(headerItem, MENU_ID_COPY_CHAT_ID, 0,
-                    "📋 复制聊天ID (" + dialogId + ")");
-            View copyView = (View) copyItem;
-            copyView.setOnClickListener(v -> showAndCopyDialogId(context, dialogId, channelName));
-
             // 表情过滤菜单项（标题反映当前规则状态）；传 chatActivity 供保存后自动重进
             View reactionsView = (View) addSubItem.invoke(headerItem, MENU_ID_REACTIONS, 0,
                     buildReactionsMenuTitle(config, dialogId));
@@ -363,18 +361,30 @@ public class ChatHelperHook {
     private static void hookDialogsActionMode(ClassLoader cl, XposedModule module, FilterConfig config) {
         try {
             Class<?> daClass = cl.loadClass("org.telegram.ui.DialogsActivity");
-            Method m = daClass.getDeclaredMethod("createActionMode", String.class);
-            m.setAccessible(true);
-            module.hook(m).intercept(chain -> {
-                Object ret = chain.proceed();
-                try {
-                    injectDialogsActionModeItem(chain.getThisObject(), cl, module, config);
-                } catch (Throwable t) {
-                    module.log(Log.WARN, TAG, "Dialogs action-mode inject failed: " + t.getMessage());
-                }
-                return ret;
-            });
-            module.log(Log.INFO, TAG, "Hooked DialogsActivity.createActionMode (list ⚡ entry)");
+            // 按名挂钩所有 createActionMode 重载（新老版本参数表不同：
+            // (String tag) / () 等，精确签名在旧版本会 NoSuchMethodException 静默失败）；
+            // 注入幂等（tag 防重），多重载只会生效一次
+            int hooked = 0;
+            for (Method cand : daClass.getDeclaredMethods()) {
+                if (!"createActionMode".equals(cand.getName())) continue;
+                cand.setAccessible(true);
+                module.hook(cand).intercept(chain -> {
+                    Object ret = chain.proceed();
+                    try {
+                        injectDialogsActionModeItem(chain.getThisObject(), cl, module, config);
+                    } catch (Throwable t) {
+                        module.log(Log.WARN, TAG, "Dialogs action-mode inject failed: " + t.getMessage());
+                    }
+                    return ret;
+                });
+                hooked++;
+            }
+            if (hooked == 0) {
+                module.log(Log.WARN, TAG, "createActionMode not found, list ⚡ entry off");
+                return;
+            }
+            module.log(Log.INFO, TAG, "Hooked DialogsActivity.createActionMode x"
+                    + hooked + " (list ⚡ entry)");
         } catch (Throwable t) {
             // 非致命：进频道内 ⚡ 菜单与 App 端长按编辑仍可用
             module.log(Log.WARN, TAG, "DialogsActivity hook failed: " + t.getMessage());
@@ -384,38 +394,98 @@ public class ChatHelperHook {
     private static void injectDialogsActionModeItem(Object dialogsActivity, ClassLoader cl,
                                                     XposedModule module, FilterConfig config)
             throws Exception {
-        if (cachedActionModeViewsField == null) {
-            cachedActionModeViewsField = findFieldInHierarchy(
-                    dialogsActivity.getClass(), "actionModeViews");
-            if (cachedActionModeViewsField == null) {
-                module.log(Log.WARN, TAG, "actionModeViews not found, list ⚡ entry off");
-                return;
-            }
-            cachedActionModeViewsField.setAccessible(true);
-        }
-        Object listObj = cachedActionModeViewsField.get(dialogsActivity);
-        if (!(listObj instanceof List)) return;
-
-        // ⋮ 溢出菜单宿主 = actionModeViews 中唯一的 ActionBarMenuItem
         Class<?> abmiClass = cl.loadClass("org.telegram.ui.ActionBar.ActionBarMenuItem");
-        Object otherItem = null;
-        for (Object v : (List<?>) listObj) {
-            if (abmiClass.isInstance(v)) { otherItem = v; break; }
+        Object otherItem = findOverflowHost(dialogsActivity, cl, abmiClass);
+        if (otherItem == null) {
+            module.log(Log.WARN, TAG, "no ActionBarMenuItem host in action mode, list ⚡ entry off");
+            return;
         }
-        if (otherItem == null) return;
         if (TAG_DIALOGS_INJECTED.equals(View.class.cast(otherItem).getTag())) return;
 
         Method addSubItem = findMethodInHierarchy(abmiClass, "addSubItem",
                 int.class, int.class, CharSequence.class);
-        if (addSubItem == null) return;
+        if (addSubItem == null) {
+            module.log(Log.WARN, TAG, "addSubItem not found, list ⚡ entry off");
+            return;
+        }
         addSubItem.setAccessible(true);
         View item = (View) addSubItem.invoke(otherItem, MENU_ID_DIALOGS_REACTIONS, 0,
                 "⚡ 表情过滤");
         View.class.cast(otherItem).setTag(TAG_DIALOGS_INJECTED);
         Context context = ((View) otherItem).getContext();
+        // 顺手注册重扫接收器（用户长按会话列表时 App 大概率活着，
+        // 是 ensureRescanReceiver 最早的可用时机之一）
+        ensureRescanReceiver(context);
         item.setOnClickListener(v -> handleDialogsReactionsClick(
                 dialogsActivity, context, cl, config, module));
         module.log(Log.INFO, TAG, "Injected ⚡ into dialogs action-mode overflow");
+    }
+
+    /**
+     * 定位操作模式「⋮」溢出菜单宿主（ActionBarMenuItem）：
+     * 优先 actionModeViews（TG 原生字段，唯一 ActionBarMenuItem）；
+     * 版本容错回退：扫描其它 List 字段找 ActionBarMenuItem 实例。
+     */
+    private static Object findOverflowHost(Object dialogsActivity, ClassLoader cl,
+                                           Class<?> abmiClass) throws Exception {
+        if (cachedActionModeViewsField == null) {
+            Field f = findFieldInHierarchy(dialogsActivity.getClass(), "actionModeViews");
+            if (f != null) {
+                f.setAccessible(true);
+                cachedActionModeViewsField = f;
+            }
+        }
+        if (cachedActionModeViewsField != null) {
+            Object hit = firstMenuItemIn(cachedActionModeViewsField.get(dialogsActivity), abmiClass);
+            if (hit != null) return hit;
+        }
+        for (Field f : dialogsActivity.getClass().getDeclaredFields()) {
+            if (!List.class.isAssignableFrom(f.getType())) continue;
+            try {
+                f.setAccessible(true);
+                Object hit = firstMenuItemIn(f.get(dialogsActivity), abmiClass);
+                if (hit != null) return hit;
+            } catch (Throwable ignored) {}
+        }
+        return null;
+    }
+
+    private static Object firstMenuItemIn(Object listObj, Class<?> abmiClass) {
+        if (!(listObj instanceof List)) return null;
+        for (Object v : (List<?>) listObj) {
+            if (abmiClass.isInstance(v)) return v;
+        }
+        return null;
+    }
+
+    /**
+     * 注册 App→TG 重扫请求接收器（进程内一次）：
+     * App 端频道列表空(重装/清数据/MIUI 拦截首批广播)时点"重新扫描"，
+     * 此处清除 scannedAccounts，用户进任意聊天页即触发批量重扫上报——
+     * 此时 App 在前台活着，TG→App 广播不再受 MIUI 自启动拦截。
+     */
+    private static void ensureRescanReceiver(Context context) {
+        if (rescanReceiverRegistered) return;
+        try {
+            Context appContext = context.getApplicationContext();
+            android.content.BroadcastReceiver receiver = new android.content.BroadcastReceiver() {
+                @Override public void onReceive(Context ctx, Intent intent) {
+                    scannedAccounts.clear();
+                    Log.i(TAG, "Rescan requested from App, will re-scan on next chat open");
+                }
+            };
+            android.content.IntentFilter filter =
+                    new android.content.IntentFilter(ACTION_RESCAN_CHANNELS);
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                appContext.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
+            } else {
+                appContext.registerReceiver(receiver, filter);
+            }
+            rescanReceiverRegistered = true;
+            Log.i(TAG, "Rescan request receiver registered");
+        } catch (Throwable t) {
+            Log.w(TAG, "Rescan receiver registration failed: " + t.getMessage());
+        }
     }
 
     private static void handleDialogsReactionsClick(Object dialogsActivity, Context context,
@@ -1175,23 +1245,6 @@ public class ChatHelperHook {
             cachedGetName = null;
             return String.valueOf(dialogId);
         }
-    }
-
-    private static void showAndCopyDialogId(Context context, long dialogId, String channelName) {
-        try {
-            ClipboardManager clipboard = (ClipboardManager)
-                    context.getSystemService(Context.CLIPBOARD_SERVICE);
-            ClipData clip = ClipData.newPlainText("TGClean Chat ID", String.valueOf(dialogId));
-            clipboard.setPrimaryClip(clip);
-        } catch (Throwable ignored) {}
-
-        new android.app.AlertDialog.Builder(context)
-                .setTitle("TGClean")
-                .setMessage("聊天ID已复制到剪贴板：\n" + dialogId
-                        + "\n\n频道：" + channelName
-                        + "\n\n在 TGClean App 的规则集详情中按名称勾选此频道，即可对该频道应用关键词过滤")
-                .setPositiveButton("确定", null)
-                .show();
     }
 
     private static long getDialogId(Object chatActivity, ClassLoader cl) {

@@ -287,7 +287,7 @@
                         android:id="@+id/text_empty_channels"
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="还没有发现频道。打开 Telegram 任意频道后回到本页；若始终为空，请检查 LSPosed 中模块是否启用并勾选 Telegram 作用域，再强制重启 Telegram"
+                        android:text="还没有发现频道。点此请求重新扫描，然后保持本页打开，切到 Telegram 进入任意聊天页，频道会自动汇入；若仍无效，请检查 LSPosed 中模块是否启用并勾选 Telegram 作用域，再强制重启 Telegram"
                         android:textAppearance="?attr/textAppearanceBodySmall"
                         android:textColor="?attr/colorOnSurfaceVariant"
                         android:gravity="center"

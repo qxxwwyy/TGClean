@@ -156,6 +156,9 @@ public class SettingsActivity extends AppCompatActivity {
         editChannelSearch = findViewById(R.id.edit_channel_search);
         textChannelCount = findViewById(R.id.text_channel_count);
         textEmptyChannels = findViewById(R.id.text_empty_channels);
+        // 频道列表空(重装/清数据/MIUI 拦截首批广播)时的恢复入口:
+        // 请求 TG 进程清除"已扫描"标记,保持本页打开后进任意聊天页即批量重扫
+        textEmptyChannels.setOnClickListener(v -> requestChannelRescan());
 
         rowSearchDepth = findViewById(R.id.row_search_depth);
         rowSearchDepth.setOnClickListener(v -> showSearchDepthDialog());
@@ -322,6 +325,23 @@ public class SettingsActivity extends AppCompatActivity {
         channelCache = channels;
         ruleSetsByChannel = writer != null ? writer.getChannelRuleSets() : Collections.emptyMap();
         reactionsRulesCache = writer != null ? writer.getReactionsRules() : Collections.emptyMap();
+    }
+
+    /** 请求 TG 进程重扫频道并批量上报（App 保持前台时 TG→App 广播不受
+     *  MIUI 自启动拦截；TG 端接收器在 ChatHelperHook.ensureRescanReceiver） */
+    private void requestChannelRescan() {
+        try {
+            android.content.Intent it = new android.content.Intent(
+                    "com.tgclean.ACTION_RESCAN_CHANNELS");
+            it.setPackage("org.telegram.messenger");
+            it.addFlags(android.content.Intent.FLAG_INCLUDE_STOPPED_PACKAGES);
+            sendBroadcast(it);
+            Snackbar.make(getRoot(),
+                    "已请求重新扫描：保持本页打开，切到 Telegram 进入任意聊天页，频道会自动汇入",
+                    Snackbar.LENGTH_LONG).show();
+        } catch (Throwable t) {
+            Snackbar.make(getRoot(), "请求失败：" + t.getMessage(), Snackbar.LENGTH_LONG).show();
+        }
     }
 
     private void runSearch() {

@@ -1,6 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- App→TG 反向通道（重新扫描频道请求）：发送 setPackage 广播需能解析 Telegram 包 -->
+    <queries>
+        <package android:name="org.telegram.messenger" />
+    </queries>
+
     <application
         android:name=".App"
         android:label="@string/app_name"
