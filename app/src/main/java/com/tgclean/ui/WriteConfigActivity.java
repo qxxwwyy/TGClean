@@ -47,8 +47,10 @@ public class WriteConfigActivity extends Activity {
         rule.emoji2 = intent.getStringExtra("emoji2");
         rule.maxCount = intent.getIntExtra("max_count", 0);
         rule.maxDepth = intent.getIntExtra("max_depth", 0); // 0 = 跟随全局默认（审计 F-1）
+        rule.emojiSet = intent.getStringExtra("emoji_set");
         if (rule.emoji == null) rule.emoji = "";
         if (rule.emoji2 == null) rule.emoji2 = "";
+        if (rule.emojiSet == null) rule.emojiSet = "";
 
         if (dialogId == 0) {
             finish();

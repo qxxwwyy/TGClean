@@ -287,6 +287,7 @@ public class FilterConfigWriter {
                 rule.emoji2 = r.optString("emoji2", "");
                 rule.maxCount = r.optInt("maxCount", 0);
                 rule.maxDepth = r.optInt("maxDepth", 0);
+                rule.emojiSet = r.optString("emojiSet", ""); // 新版字段，缺失回落单 emoji
                 try {
                     result.put(Long.parseLong(key), rule);
                 } catch (NumberFormatException ignored) {}
@@ -313,6 +314,7 @@ public class FilterConfigWriter {
                 r.put("emoji2", e.getValue().emoji2 != null ? e.getValue().emoji2 : "");
                 r.put("maxCount", e.getValue().maxCount);
                 r.put("maxDepth", e.getValue().maxDepth);
+                r.put("emojiSet", e.getValue().emojiSet != null ? e.getValue().emojiSet : "");
                 obj.put(String.valueOf(e.getKey()), r);
             }
             prefs.edit().putString(KEY_REACTIONS_RULES, obj.toString()).apply();

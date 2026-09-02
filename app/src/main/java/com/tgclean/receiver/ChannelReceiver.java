@@ -94,8 +94,10 @@ public class ChannelReceiver extends BroadcastReceiver {
         rule.emoji2 = intent.getStringExtra("emoji2");
         rule.maxCount = intent.getIntExtra("max_count", 0);
         rule.maxDepth = intent.getIntExtra("max_depth", 0); // 0 = 跟随全局默认
+        rule.emojiSet = intent.getStringExtra("emoji_set"); // 多表情合计（可空，旧调用方缺失回落单 emoji）
         if (rule.emoji == null) rule.emoji = "";
         if (rule.emoji2 == null) rule.emoji2 = "";
+        if (rule.emojiSet == null) rule.emojiSet = "";
 
         submitRuleWrite(context, dialogId, rule,
                 intent.getStringExtra("token"), intent.getStringExtra("nonce"));

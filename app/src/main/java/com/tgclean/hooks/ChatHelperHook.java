@@ -42,7 +42,14 @@ public class ChatHelperHook {
 
     private static final int MENU_ID_COPY_CHAT_ID = 999002;
     private static final int MENU_ID_REACTIONS = 999003;
+    private static final int MENU_ID_DIALOGS_REACTIONS = 999004;
     private static final String TAG_INJECTED = "tgclean_injected";
+    private static final String TAG_DIALOGS_INJECTED = "tgclean_dialogs_injected";
+
+    // 会话列表操作模式反射字段缓存（actionModeViews 定位 ⋮ 溢出菜单宿主，
+    // selectedDialogs 读当前选中会话）
+    private static volatile Field cachedActionModeViewsField;
+    private static volatile Field cachedSelectedDialogsField;
 
     // 表情过滤规则广播（TG 进程 → TGClean App 进程）
     private static final String ACTION_REACTIONS_RULE = "com.tgclean.ACTION_REACTIONS_RULE";
@@ -72,6 +79,11 @@ public class ChatHelperHook {
             hookOnResume(cl, module, config);
         } catch (Throwable t) {
             module.log(Log.ERROR, TAG, "Failed to setup ChatHelperHook", t);
+        }
+        try {
+            hookDialogsActionMode(cl, module, config);
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "Failed to setup DialogsActivity hook", t);
         }
     }
 
@@ -302,12 +314,13 @@ public class ChatHelperHook {
             View copyView = (View) copyItem;
             copyView.setOnClickListener(v -> showAndCopyDialogId(context, dialogId, channelName));
 
-            // 表情过滤菜单项（标题反映当前规则状态）
+            // 表情过滤菜单项（标题反映当前规则状态）；传 chatActivity 供保存后自动重进
             View reactionsView = (View) addSubItem.invoke(headerItem, MENU_ID_REACTIONS, 0,
                     buildReactionsMenuTitle(config, dialogId));
+            final Object chatAct = chatActivity;
             reactionsView.setOnClickListener(v -> showReactionsFilterDialog(
                     context, dialogId, channelName, config, module, newTitle ->
-                            updateMenuItemText(reactionsView, newTitle)));
+                            updateMenuItemText(reactionsView, newTitle), chatAct));
 
             module.log(Log.INFO, TAG, "Injected menus (dialogId=" + dialogId
                     + ", channel=" + channelName + ")");
@@ -340,6 +353,164 @@ public class ChatHelperHook {
     }
 
     // ═════════════════════════════════════════════
+    // 会话列表操作模式「⋮」溢出菜单注入 —— 进频道前配置表情过滤
+    //（现代 TG 长按即进入多选操作模式，无长按弹窗菜单；溢出菜单是唯一
+    //  稳定入口：DialogsActivity.createActionMode → otherItem.addSubItem，
+    //  2024→master 结构未变。注入方式与频道内 ⚡ 菜单同款：替换子项点击
+    //  监听，不经 TG 原生 id 分发）
+    // ═════════════════════════════════════════════
+
+    private static void hookDialogsActionMode(ClassLoader cl, XposedModule module, FilterConfig config) {
+        try {
+            Class<?> daClass = cl.loadClass("org.telegram.ui.DialogsActivity");
+            Method m = daClass.getDeclaredMethod("createActionMode", String.class);
+            m.setAccessible(true);
+            module.hook(m).intercept(chain -> {
+                Object ret = chain.proceed();
+                try {
+                    injectDialogsActionModeItem(chain.getThisObject(), cl, module, config);
+                } catch (Throwable t) {
+                    module.log(Log.WARN, TAG, "Dialogs action-mode inject failed: " + t.getMessage());
+                }
+                return ret;
+            });
+            module.log(Log.INFO, TAG, "Hooked DialogsActivity.createActionMode (list ⚡ entry)");
+        } catch (Throwable t) {
+            // 非致命：进频道内 ⚡ 菜单与 App 端长按编辑仍可用
+            module.log(Log.WARN, TAG, "DialogsActivity hook failed: " + t.getMessage());
+        }
+    }
+
+    private static void injectDialogsActionModeItem(Object dialogsActivity, ClassLoader cl,
+                                                    XposedModule module, FilterConfig config)
+            throws Exception {
+        if (cachedActionModeViewsField == null) {
+            cachedActionModeViewsField = findFieldInHierarchy(
+                    dialogsActivity.getClass(), "actionModeViews");
+            if (cachedActionModeViewsField == null) {
+                module.log(Log.WARN, TAG, "actionModeViews not found, list ⚡ entry off");
+                return;
+            }
+            cachedActionModeViewsField.setAccessible(true);
+        }
+        Object listObj = cachedActionModeViewsField.get(dialogsActivity);
+        if (!(listObj instanceof List)) return;
+
+        // ⋮ 溢出菜单宿主 = actionModeViews 中唯一的 ActionBarMenuItem
+        Class<?> abmiClass = cl.loadClass("org.telegram.ui.ActionBar.ActionBarMenuItem");
+        Object otherItem = null;
+        for (Object v : (List<?>) listObj) {
+            if (abmiClass.isInstance(v)) { otherItem = v; break; }
+        }
+        if (otherItem == null) return;
+        if (TAG_DIALOGS_INJECTED.equals(View.class.cast(otherItem).getTag())) return;
+
+        Method addSubItem = findMethodInHierarchy(abmiClass, "addSubItem",
+                int.class, int.class, CharSequence.class);
+        if (addSubItem == null) return;
+        addSubItem.setAccessible(true);
+        View item = (View) addSubItem.invoke(otherItem, MENU_ID_DIALOGS_REACTIONS, 0,
+                "⚡ 表情过滤");
+        View.class.cast(otherItem).setTag(TAG_DIALOGS_INJECTED);
+        Context context = ((View) otherItem).getContext();
+        item.setOnClickListener(v -> handleDialogsReactionsClick(
+                dialogsActivity, context, cl, config, module));
+        module.log(Log.INFO, TAG, "Injected ⚡ into dialogs action-mode overflow");
+    }
+
+    private static void handleDialogsReactionsClick(Object dialogsActivity, Context context,
+                                                    ClassLoader cl, FilterConfig config,
+                                                    XposedModule module) {
+        try {
+            long dialogId = singleSelectedDialog(dialogsActivity);
+            if (dialogId == -1L) {
+                Toast.makeText(context, "TGClean：请只选择一个会话再设置", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (dialogId == 0) {
+                Toast.makeText(context, "TGClean：未识别到所选会话", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (dialogId > 0) { // 正数 = 私聊用户；表情过滤只对频道/群组有意义
+                Toast.makeText(context, "TGClean：表情过滤仅支持频道/群组", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            int accountIdx = getCurrentAccount(dialogsActivity, cl);
+            String name = resolveChannelName(dialogId, accountIdx, cl);
+            showReactionsFilterDialog(context, dialogId, name, config, module, null, null);
+        } catch (Throwable t) {
+            module.log(Log.ERROR, TAG, "Dialogs ⚡ click failed: " + t.getMessage());
+        }
+    }
+
+    /** 操作模式选中集合：恰一个 → 其 id；多个 → -1；异常/空 → 0 */
+    private static long singleSelectedDialog(Object dialogsActivity) {
+        try {
+            if (cachedSelectedDialogsField == null) {
+                cachedSelectedDialogsField = findFieldInHierarchy(
+                        dialogsActivity.getClass(), "selectedDialogs");
+                if (cachedSelectedDialogsField == null) return 0;
+                cachedSelectedDialogsField.setAccessible(true);
+            }
+            Object sel = cachedSelectedDialogsField.get(dialogsActivity);
+            if (!(sel instanceof List) || ((List<?>) sel).isEmpty()) return 0;
+            if (((List<?>) sel).size() > 1) return -1L;
+            Object v = ((List<?>) sel).get(0);
+            if (v instanceof Long) return (Long) v;
+            if (v instanceof Number) return ((Number) v).longValue();
+            return 0;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    /**
+     * 保存生效后自动"重进"频道：构造同频道的 ChatActivity 并 presentFragment；
+     * TG 前进导航自带 need_remove_previous_same_chat_activity（默认 true），
+     * 会移除旧的同频道实例——等效用户退出重进，新实例的消息加载重新经过
+     * 滤边界。反射失败/呈现被拒时回退提示手动重进。
+     */
+    private static void reopenChannel(Object chatActivity, long dialogId) {
+        Context toastCtx = null;
+        try {
+            ClassLoader cl = chatActivity.getClass().getClassLoader();
+            toastCtx = getActivityContext(chatActivity, cl); // 先取上下文，任何后续失败都能兜底提示
+            Class<?> caClass = cl.loadClass("org.telegram.ui.ChatActivity");
+            Class<?> bfClass = cl.loadClass("org.telegram.ui.ActionBar.BaseFragment");
+            android.os.Bundle args = new android.os.Bundle();
+            args.putLong("chat_id", -dialogId); // 频道 dialogId 为负，chat_id 取反
+            Object fresh = caClass.getConstructor(android.os.Bundle.class).newInstance(args);
+            Object result = null;
+            Method present = findMethodInHierarchy(chatActivity.getClass(),
+                    "presentFragment", bfClass);
+            if (present != null) {
+                present.setAccessible(true);
+                result = present.invoke(chatActivity, fresh);
+            } else {
+                // 回退：宿主 LaunchActivity.presentFragment(BaseFragment)
+                try {
+                    Object host = chatActivity.getClass().getMethod("getParentActivity")
+                            .invoke(chatActivity);
+                    if (host != null) {
+                        present = findMethodInHierarchy(host.getClass(),
+                                "presentFragment", bfClass);
+                        if (present != null) {
+                            present.setAccessible(true);
+                            result = present.invoke(host, fresh);
+                        }
+                    }
+                } catch (Throwable ignored) {}
+            }
+            if (Boolean.TRUE.equals(result)) return;
+        } catch (Throwable ignored) {
+        }
+        if (toastCtx != null) {
+            Toast.makeText(toastCtx, "TGClean：自动重进未成功，请手动重新进入频道生效",
+                    Toast.LENGTH_LONG).show();
+        }
+    }
+
+    // ═════════════════════════════════════════════
     // 表情过滤配置弹窗（TG 进程内，仅 framework 控件，避免 ClassLoader 冲突）
     // ═════════════════════════════════════════════
 
@@ -348,7 +519,8 @@ public class ChatHelperHook {
     private static void showReactionsFilterDialog(Context context, long dialogId,
                                                   String channelName, FilterConfig config,
                                                   XposedModule module,
-                                                  java.util.function.Consumer<String> titleUpdater) {
+                                                  java.util.function.Consumer<String> titleUpdater,
+                                                  Object relaunchActivity) {
         ReactionsRule current = config.getReactionsChannelRules().get(dialogId);
 
         // 内容高度钳制：framework AlertDialog 给自定义视图的测量上限是整个可用屏高
@@ -381,13 +553,17 @@ public class ChatHelperHook {
         modeGroup.addView(radioBlack);
         root.addView(modeGroup);
 
-        // ── 目标表情（≥ 阈值）──
-        root.addView(sectionLabel(context, "目标表情（数量达到）"));
+        // ── 目标表情（≥ 阈值，可多选合计）──
+        root.addView(sectionLabel(context, "目标表情（可多选，计数为合计）"));
         EditText editEmoji = new EditText(context);
-        editEmoji.setHint("表情（点下方快速选择，或手动输入）");
-        root.addView(wrapHScroll(context,
-                emojiQuickRow(context, emoji -> editEmoji.setText(emoji), null)));
+        editEmoji.setHint("表情（可多个，空格分隔；点下方快速选择）");
+        LinearLayout toggleRow = emojiToggleRow(context, editEmoji);
+        root.addView(wrapHScroll(context, toggleRow));
         root.addView(editEmoji);
+        // 手动编辑后失焦时同步快速选择行的高亮状态
+        editEmoji.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus) refreshToggleRow(toggleRow, editEmoji);
+        });
         EditText editMin = new EditText(context);
         editMin.setHint("数量 ≥（如 10）");
         editMin.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
@@ -468,12 +644,25 @@ public class ChatHelperHook {
         hint.setPadding(0, dp(context, 10), 0, 0);
         root.addView(hint);
 
+        // ── 保存后自动重进（仅频道内入口：有频道实例可重进；列表入口传 null）──
+        final CheckBox checkRelaunch;
+        if (relaunchActivity != null && dialogId < 0) {
+            checkRelaunch = new CheckBox(context);
+            checkRelaunch.setText("保存后自动重进频道立即生效（推荐）");
+            checkRelaunch.setChecked(true);
+            root.addView(checkRelaunch);
+        } else {
+            checkRelaunch = null;
+        }
+
         // ── 预填当前规则 ──
         if (current != null) {
             checkEnabled.setChecked(current.enabled);
             if (current.whitelistMode) radioWhite.setChecked(true);
             else radioBlack.setChecked(true);
-            editEmoji.setText(current.emoji != null ? current.emoji : "");
+            editEmoji.setText(current.hasEmojiSet()
+                    ? String.join(" ", current.emojiSetList())
+                    : (current.emoji != null ? current.emoji : ""));
             editMin.setText(String.valueOf(current.minCount));
             editEmoji2.setText(current.emoji2 != null ? current.emoji2 : "");
             editMax.setText(String.valueOf(current.maxCount));
@@ -510,7 +699,7 @@ public class ChatHelperHook {
             try {
                 boolean enabled = checkEnabled.isChecked();
                 boolean whitelist = radioWhite.isChecked();
-                String emoji = editEmoji.getText().toString().trim();
+                java.util.List<String> targets = parseEmojiTokens(editEmoji.getText().toString());
                 String emoji2 = editEmoji2.isEnabled()
                         ? editEmoji2.getText().toString().trim() : "";
                 int minCount = parseIntOr(editMin.getText().toString(), -1);
@@ -518,8 +707,13 @@ public class ChatHelperHook {
 
                 if (enabled) {
                     // 校验失败定位到具体输入框（setError），不再用笼统 Toast（UX 复核 P1-6）
-                    if (emoji.isEmpty()) {
+                    if (targets.isEmpty()) {
                         editEmoji.setError("请选择或输入目标表情");
+                        editEmoji.requestFocus();
+                        return;
+                    }
+                    if (targets.size() > ReactionsRule.MAX_EMOJI_SET) {
+                        editEmoji.setError("最多 " + ReactionsRule.MAX_EMOJI_SET + " 个表情");
                         editEmoji.requestFocus();
                         return;
                     }
@@ -533,12 +727,16 @@ public class ChatHelperHook {
                         editMax.requestFocus();
                         return;
                     }
-                    if (emoji2.equals(emoji)) {
-                        editEmoji2.setError("两个表情不能相同");
+                    if (whitelist && !emoji2.isEmpty() && targets.contains(emoji2)) {
+                        editEmoji2.setError("负面表情不能与目标表情重复");
                         editEmoji2.requestFocus();
                         return;
                     }
                 }
+                // 单表情走旧字段（emoji），多表情写 emoji_set 求和集合；
+                // emoji 恒填首个目标，兼容"新 App 数据被旧 hook 进程读取"的短暂窗口
+                String emoji = targets.isEmpty() ? "" : targets.get(0);
+                String emojiSet = targets.size() > 1 ? String.join(" ", targets) : "";
 
                 int maxDepth;
                 if (selectedDepth[0] == customIdx) {
@@ -559,18 +757,25 @@ public class ChatHelperHook {
                 String token = config.getPairingToken();
                 String nonce = java.util.UUID.randomUUID().toString();
                 sendReactionsRuleBroadcast(context, dialogId, enabled, whitelist, emoji,
-                        minCount, emoji2, maxCount, maxDepth, token, nonce);
+                        emojiSet, minCount, emoji2, maxCount, maxDepth, token, nonce);
 
                 pendingTitleDialogId = dialogId;
                 pendingTitleNonce = nonce;
+                String targetLabel = String.join("+", targets);
                 pendingTitleText = enabled
-                        ? "⚡ 表情过滤：" + describeRule(whitelist, emoji, minCount, emoji2, maxCount)
+                        ? "⚡ 表情过滤：" + describeRule(whitelist, targetLabel, minCount, emoji2, maxCount)
                         : "⚡ 表情过滤（未启用）";
                 pendingTitleUpdater = titleUpdater;
 
+                // 回执确认后自动重进（仅频道内入口 & 规则启用 & 用户未取消勾选）
+                pendingRelaunchActivity = (checkRelaunch != null && checkRelaunch.isChecked()
+                        && enabled && relaunchActivity != null)
+                        ? new java.lang.ref.WeakReference<>(relaunchActivity) : null;
+                pendingRelaunchDialogId = dialogId;
+
                 module.log(Log.INFO, TAG, "Reactions rule save sent: dialog=" + dialogId
                         + " enabled=" + enabled + " whitelist=" + whitelist
-                        + " emoji=" + emoji + "≥" + minCount
+                        + " target=" + targetLabel + "≥" + minCount
                         + " emoji2=" + emoji2 + "≤" + maxCount
                         + " depth=" + (maxDepth > 0 ? ReactionsRule.formatDepth(maxDepth) : "default"));
                 dialog.dismiss();
@@ -580,9 +785,10 @@ public class ChatHelperHook {
         });
     }
 
-    private static String describeRule(boolean whitelist, String emoji, int minCount,
+    /** 菜单标题形态的规则描述：目标标签形如 "❤️+👍"（多表情合计）或 "❤️" */
+    private static String describeRule(boolean whitelist, String targetLabel, int minCount,
                                        String emoji2, int maxCount) {
-        StringBuilder sb = new StringBuilder(emoji).append("≥").append(minCount);
+        StringBuilder sb = new StringBuilder(targetLabel).append("≥").append(minCount);
         if (whitelist && emoji2 != null && !emoji2.isEmpty()) {
             sb.append("·").append(emoji2).append("≤").append(maxCount);
         }
@@ -606,10 +812,13 @@ public class ChatHelperHook {
     private static volatile String pendingTitleNonce;
     private static volatile String pendingTitleText;
     private static volatile java.util.function.Consumer<String> pendingTitleUpdater;
+    /** 回执确认后自动重进的频道实例（弱引用防泄漏）与目标频道 */
+    private static volatile java.lang.ref.WeakReference<Object> pendingRelaunchActivity;
+    private static volatile long pendingRelaunchDialogId;
 
     private static void sendReactionsRuleBroadcast(Context context, long dialogId,
                                                    boolean enabled, boolean whitelist,
-                                                   String emoji, int minCount,
+                                                   String emoji, String emojiSet, int minCount,
                                                    String emoji2, int maxCount, int maxDepth,
                                                    String token, String nonce) {
         Intent intent = new Intent(ACTION_REACTIONS_RULE);
@@ -619,6 +828,7 @@ public class ChatHelperHook {
         intent.putExtra("enabled", enabled);
         intent.putExtra("whitelist", whitelist);
         intent.putExtra("emoji", emoji);
+        intent.putExtra("emoji_set", emojiSet == null ? "" : emojiSet); // 多表情合计（空 = 单 emoji）
         intent.putExtra("min_count", minCount);
         intent.putExtra("emoji2", emoji2 == null ? "" : emoji2);
         intent.putExtra("max_count", maxCount);
@@ -658,6 +868,8 @@ public class ChatHelperHook {
         pendingTitleNonce = null;
         pendingTitleText = null;
         pendingTitleUpdater = null;
+        pendingRelaunchActivity = null;
+        pendingRelaunchDialogId = 0;
     }
 
     /**
@@ -685,8 +897,21 @@ public class ChatHelperHook {
                 if (pendingConfirmTimeout != null) main.removeCallbacks(pendingConfirmTimeout);
                 try { appContext.unregisterReceiver(this); } catch (Throwable ignored) {}
                 pendingConfirmReceiver = null;
-                Toast.makeText(appContext, "TGClean：规则已保存，重新进入频道后生效",
-                        Toast.LENGTH_LONG).show();
+                // 回执确认 → 写入已落地。若本次保存要求自动重进（频道内入口 +
+                // 规则启用 + 勾选未取消），立即重进频道让过滤对首轮加载生效
+                java.lang.ref.WeakReference<Object> rlRef = pendingRelaunchActivity;
+                long rlDialogId = pendingRelaunchDialogId;
+                pendingRelaunchActivity = null;
+                Object relaunchAct = rlRef == null ? null : rlRef.get();
+                long receiptDialog = i == null ? 0 : i.getLongExtra("dialog_id", 0);
+                if (relaunchAct != null && receiptDialog == rlDialogId) {
+                    Toast.makeText(appContext, "TGClean：规则已保存，正在重新进入频道生效…",
+                            Toast.LENGTH_SHORT).show();
+                    main.post(() -> reopenChannel(relaunchAct, rlDialogId));
+                } else {
+                    Toast.makeText(appContext, "TGClean：规则已保存，重新进入频道后生效",
+                            Toast.LENGTH_SHORT).show();
+                }
                 // 写入已确认落地，此刻才更新菜单标题（UX 复核 P1-8）
                 if (pendingTitleUpdater != null && pendingTitleNonce != null
                         && pendingTitleNonce.equals(nonce)
@@ -792,6 +1017,78 @@ public class ChatHelperHook {
         hsv.setHorizontalScrollBarEnabled(false);
         hsv.addView(child);
         return hsv;
+    }
+
+    /** 拆分空格/逗号分隔的表情 token（去重保序、过滤超长项），供多选合计输入 */
+    private static java.util.List<String> parseEmojiTokens(String s) {
+        java.util.List<String> out = new java.util.ArrayList<>();
+        if (s == null) return out;
+        for (String t : s.trim().split("[\\s,，]+")) {
+            if (t.isEmpty()) continue;
+            if (t.codePointCount(0, t.length()) > 16) continue;
+            if (!out.contains(t)) out.add(t);
+        }
+        return out;
+    }
+
+    /**
+     * 目标表情多选行：点击在输入框的空格分隔集合中切换选中（选中高亮、
+     * 未选半透明），附"全清"按钮；选中态文本形如 "❤️ 👍"。
+     */
+    private static LinearLayout emojiToggleRow(Context context, EditText target) {
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        for (String emoji : QUICK_EMOJIS) {
+            android.widget.Button btn = new android.widget.Button(context);
+            btn.setText(emoji);
+            btn.setAllCaps(false);
+            btn.setMinWidth(dp(context, 44));
+            btn.setPadding(0, 0, 0, 0);
+            btn.setTag(emoji);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMarginEnd(dp(context, 4));
+            btn.setLayoutParams(lp);
+            btn.setOnClickListener(v -> {
+                java.util.List<String> tokens = parseEmojiTokens(target.getText().toString());
+                if (tokens.contains(emoji)) {
+                    tokens.remove(emoji);
+                } else {
+                    if (tokens.size() >= ReactionsRule.MAX_EMOJI_SET) {
+                        Toast.makeText(context,
+                                "最多选 " + ReactionsRule.MAX_EMOJI_SET + " 个表情",
+                                Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+                    tokens.add(emoji);
+                }
+                target.setText(String.join(" ", tokens));
+                target.setSelection(target.getText().length());
+                refreshToggleRow(row, target);
+            });
+            row.addView(btn);
+        }
+        android.widget.Button clear = new android.widget.Button(context);
+        clear.setText("✖ 全清");
+        clear.setAllCaps(false);
+        clear.setOnClickListener(v -> {
+            target.setText("");
+            refreshToggleRow(row, target);
+        });
+        row.addView(clear);
+        refreshToggleRow(row, target);
+        return row;
+    }
+
+    /** 按输入框当前 token 集合同步快速选择行的选中高亮 */
+    private static void refreshToggleRow(LinearLayout row, EditText target) {
+        java.util.List<String> tokens = parseEmojiTokens(target.getText().toString());
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View c = row.getChildAt(i);
+            if (c.getTag() instanceof String) {
+                c.setAlpha(tokens.contains((String) c.getTag()) ? 1f : 0.45f);
+            }
+        }
     }
 
     private static int parseIntOr(String s, int def) {

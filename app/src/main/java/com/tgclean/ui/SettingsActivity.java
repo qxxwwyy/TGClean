@@ -5,11 +5,21 @@ import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.util.Log;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.RadioButton;
+import android.widget.RadioGroup;
+import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
@@ -391,6 +401,377 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     // ═════════════════════════════════════════════
+    // 频道长按：表情过滤规则编辑（进频道前配置的第二入口；
+    // TG 内会话列表 ⋮ 菜单为第一入口。App 端 writer 可直写
+    // remote prefs——无需广播/令牌/回执链）
+    // ═════════════════════════════════════════════
+
+    private static final String[] QUICK_EMOJIS = {"👍", "👎", "❤️", "🔥", "🥰", "😂", "🤩", "💯"};
+
+    private void showReactionsRuleEditor(ChannelSummary ch) {
+        if (writer == null) {
+            Snackbar.make(getRoot(), "LSPosed 服务未就绪", Snackbar.LENGTH_LONG).show();
+            return;
+        }
+        ReactionsRule current = reactionsRulesCache.get(ch.id);
+
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        root.setPadding(pad, dp(6), pad, dp(4));
+        scroll.addView(root);
+
+        CheckBox checkEnabled = new CheckBox(this);
+        checkEnabled.setText("启用本频道表情过滤");
+        root.addView(checkEnabled);
+
+        RadioGroup modeGroup = new RadioGroup(this);
+        RadioButton radioWhite = new RadioButton(this);
+        radioWhite.setText("白名单：只显示达标消息（找高价值资源）");
+        RadioButton radioBlack = new RadioButton(this);
+        radioBlack.setText("黑名单：隐藏达标消息（如踩多了就隐藏）");
+        modeGroup.addView(radioWhite);
+        modeGroup.addView(radioBlack);
+        root.addView(modeGroup);
+
+        root.addView(sectionLabel("目标表情（可多选，计数为合计）"));
+        EditText editEmoji = new EditText(this);
+        editEmoji.setHint("表情（可多个，空格分隔；点下方快速选择）");
+        LinearLayout toggleRow = buildEmojiToggleRow(editEmoji);
+        root.addView(wrapHorizontal(toggleRow));
+        root.addView(editEmoji);
+        EditText editMin = new EditText(this);
+        editMin.setHint("合计数量 ≥（如 10）");
+        editMin.setInputType(InputType.TYPE_CLASS_NUMBER);
+        root.addView(editMin);
+
+        TextView label2 = sectionLabel("负面表情上限（仅白名单模式，可选）");
+        root.addView(label2);
+        EditText editEmoji2 = new EditText(this);
+        editEmoji2.setHint("留空 = 不启用（如：踩超过 20 个则排除）");
+        LinearLayout row2 = buildEmojiPickRow(editEmoji2);
+        root.addView(wrapHorizontal(row2));
+        root.addView(editEmoji2);
+        EditText editMax = new EditText(this);
+        editMax.setHint("数量 ≤（如 20）");
+        editMax.setInputType(InputType.TYPE_CLASS_NUMBER);
+        root.addView(editMax);
+
+        root.addView(sectionLabel("检索深度（筛选后剩太少时，自动向前翻找的范围）"));
+        final int customIdx = ReactionsRule.DEPTH_PRESETS.length + 1;
+        final String[] depthChoices = new String[ReactionsRule.DEPTH_PRESETS.length + 2];
+        depthChoices[0] = "跟随全局默认（当前 "
+                + ReactionsRule.formatDepth(writer.getReactionsSearchDepth()) + " 条）";
+        for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
+            depthChoices[i + 1] = ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]) + " 条";
+        }
+        depthChoices[customIdx] = "自定义…";
+        int presetIdx = 0;
+        int prefillCustom = 0;
+        if (current != null && current.maxDepth > 0) {
+            for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
+                if (ReactionsRule.DEPTH_PRESETS[i] == current.maxDepth) {
+                    presetIdx = i + 1;
+                    break;
+                }
+            }
+            if (presetIdx == 0) {
+                presetIdx = customIdx;
+                prefillCustom = current.maxDepth;
+                depthChoices[customIdx] = "自定义（"
+                        + ReactionsRule.formatDepth(current.maxDepth) + " 条）";
+            }
+        }
+        final int[] selectedDepth = {presetIdx};
+        final int[] customDepth = {prefillCustom};
+        // 与 TG 内弹窗同款：吞掉程序化 setSelection 的首个异步回调，
+        // 避免预填自定义档时弹窗一打开就弹输入框
+        final boolean[] spinnerReady = {false};
+        Spinner depthSpinner = new Spinner(this);
+        ArrayAdapter<String> depthAdapter = new ArrayAdapter<>(this,
+                android.R.layout.simple_spinner_item, depthChoices);
+        depthAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        depthSpinner.setAdapter(depthAdapter);
+        depthSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
+                if (!spinnerReady[0]) {
+                    spinnerReady[0] = true;
+                    selectedDepth[0] = pos;
+                    return;
+                }
+                selectedDepth[0] = pos;
+                if (pos == customIdx) promptAppCustomDepth(depthChoices, customIdx, customDepth, depthAdapter);
+            }
+            @Override public void onNothingSelected(AdapterView<?> p) {}
+        });
+        depthSpinner.setSelection(presetIdx);
+        root.addView(depthSpinner);
+
+        // 预填当前规则
+        if (current != null) {
+            checkEnabled.setChecked(current.enabled);
+            if (current.whitelistMode) radioWhite.setChecked(true);
+            else radioBlack.setChecked(true);
+            editEmoji.setText(current.hasEmojiSet()
+                    ? String.join(" ", current.emojiSetList())
+                    : (current.emoji != null ? current.emoji : ""));
+            editMin.setText(String.valueOf(current.minCount));
+            editEmoji2.setText(current.emoji2 != null ? current.emoji2 : "");
+            editMax.setText(String.valueOf(current.maxCount));
+        } else {
+            radioWhite.setChecked(true);
+            editMin.setText("10");
+            editMax.setText("20");
+        }
+        refreshToggleHighlights(toggleRow, editEmoji);
+
+        // 模式切换时启停负面表情区（与 TG 内弹窗同款）
+        final View[] section2 = {label2, editEmoji2, editMax, row2};
+        Runnable updateSection2 = () -> {
+            boolean white = radioWhite.isChecked();
+            for (View v : section2) v.setAlpha(white ? 1f : 0.4f);
+            editEmoji2.setEnabled(white);
+            editMax.setEnabled(white);
+            for (int i = 0; i < row2.getChildCount(); i++) {
+                row2.getChildAt(i).setEnabled(white);
+            }
+        };
+        modeGroup.setOnCheckedChangeListener((group, id) -> updateSection2.run());
+        updateSection2.run();
+
+        final androidx.appcompat.app.AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("⚡ 表情过滤 — " + ch.name)
+                .setMessage("频道 ID " + ch.id)
+                .setView(scroll)
+                .setPositiveButton("保存", null)
+                .setNegativeButton("取消", null)
+                .show();
+        // 覆盖默认点击行为：校验失败不关闭
+        dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE)
+                .setOnClickListener(v -> {
+                    boolean enabled = checkEnabled.isChecked();
+                    boolean whitelist = radioWhite.isChecked();
+                    List<String> targets = parseEmojiTokens(editEmoji.getText().toString());
+                    String emoji2 = editEmoji2.isEnabled()
+                            ? editEmoji2.getText().toString().trim() : "";
+                    int minCount = parseIntOr(editMin.getText().toString(), -1);
+                    int maxCount = parseIntOr(editMax.getText().toString(), -1);
+
+                    if (enabled) {
+                        if (targets.isEmpty()) {
+                            editEmoji.setError("请选择或输入目标表情");
+                            editEmoji.requestFocus();
+                            return;
+                        }
+                        if (targets.size() > ReactionsRule.MAX_EMOJI_SET) {
+                            editEmoji.setError("最多 " + ReactionsRule.MAX_EMOJI_SET + " 个表情");
+                            editEmoji.requestFocus();
+                            return;
+                        }
+                        if (minCount < 0) {
+                            editMin.setError("请输入 ≥ 0 的数字");
+                            editMin.requestFocus();
+                            return;
+                        }
+                        if (whitelist && !emoji2.isEmpty() && maxCount < 0) {
+                            editMax.setError("请输入 ≥ 0 的数字");
+                            editMax.requestFocus();
+                            return;
+                        }
+                        if (whitelist && !emoji2.isEmpty() && targets.contains(emoji2)) {
+                            editEmoji2.setError("负面表情不能与目标表情重复");
+                            editEmoji2.requestFocus();
+                            return;
+                        }
+                    }
+                    int maxDepth;
+                    if (selectedDepth[0] == customIdx) {
+                        if (customDepth[0] <= 0) {
+                            Snackbar.make(getRoot(), "请先在“自定义…”中输入检索深度",
+                                    Snackbar.LENGTH_SHORT).show();
+                            return;
+                        }
+                        maxDepth = customDepth[0];
+                    } else if (selectedDepth[0] > 0) {
+                        maxDepth = ReactionsRule.DEPTH_PRESETS[selectedDepth[0] - 1];
+                    } else {
+                        maxDepth = 0; // 0 = 跟随全局默认
+                    }
+
+                    ReactionsRule rule = new ReactionsRule();
+                    rule.enabled = enabled;
+                    rule.whitelistMode = whitelist;
+                    rule.emoji = targets.isEmpty() ? "" : targets.get(0);
+                    rule.emojiSet = targets.size() > 1 ? String.join(" ", targets) : "";
+                    rule.minCount = Math.max(0, minCount);
+                    rule.emoji2 = emoji2;
+                    rule.maxCount = Math.max(0, maxCount);
+                    rule.maxDepth = maxDepth;
+                    rule.sanitize(); // 与 TG 广播写通道同款消毒（防未来绕过弹窗的调用方）
+                    writer.setReactionsRule(ch.id, rule);
+
+                    dialog.dismiss();
+                    rebuildChannelData();
+                    applyChannelFilter(lastQuery);
+                    Snackbar.make(getRoot(), "已保存，进入频道即生效", Snackbar.LENGTH_LONG).show();
+                });
+    }
+
+    /** 深度自定义档输入（App 端版）：钳制后回填 Spinner 档位标签 */
+    private void promptAppCustomDepth(String[] depthChoices, int customIdx,
+                                      int[] customDepth, ArrayAdapter<String> adapter) {
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        if (customDepth[0] > 0) input.setText(String.valueOf(customDepth[0]));
+        input.setHint(ReactionsRule.MIN_DEPTH + " ~ "
+                + ReactionsRule.formatDepth(ReactionsRule.MAX_DEPTH));
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("自定义检索深度（条）")
+                .setView(input)
+                .setPositiveButton("确定", (d, w) -> {
+                    String t = input.getText().toString().trim();
+                    int v;
+                    try {
+                        v = Integer.parseInt(t);
+                    } catch (NumberFormatException e) {
+                        v = t.matches("\\d{10,}") ? ReactionsRule.MAX_DEPTH : -1;
+                    }
+                    if (v <= 0) {
+                        Snackbar.make(getRoot(), "请输入正整数", Snackbar.LENGTH_SHORT).show();
+                        return;
+                    }
+                    customDepth[0] = ReactionsRule.clampDepth(v);
+                    depthChoices[customIdx] = "自定义（"
+                            + ReactionsRule.formatDepth(customDepth[0]) + " 条）";
+                    adapter.notifyDataSetChanged();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private TextView sectionLabel(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setPadding(0, dp(10), 0, dp(4));
+        return tv;
+    }
+
+    /** 拆分空格/逗号分隔的表情 token（去重保序、过滤超长项） */
+    private static List<String> parseEmojiTokens(String s) {
+        List<String> out = new ArrayList<>();
+        if (s == null) return out;
+        for (String t : s.trim().split("[\\s,，]+")) {
+            if (t.isEmpty()) continue;
+            if (t.codePointCount(0, t.length()) > 16) continue;
+            if (!out.contains(t)) out.add(t);
+        }
+        return out;
+    }
+
+    /** 目标表情多选行：点击切换输入框集合中的选中态（选中高亮），附"全清" */
+    private LinearLayout buildEmojiToggleRow(EditText target) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        for (String emoji : QUICK_EMOJIS) {
+            Button btn = new Button(this);
+            btn.setText(emoji);
+            btn.setAllCaps(false);
+            btn.setMinWidth(dp(44));
+            btn.setPadding(0, 0, 0, 0);
+            btn.setTag(emoji);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMarginEnd(dp(4));
+            btn.setLayoutParams(lp);
+            btn.setOnClickListener(v -> {
+                List<String> tokens = parseEmojiTokens(target.getText().toString());
+                if (tokens.contains(emoji)) {
+                    tokens.remove(emoji);
+                } else {
+                    if (tokens.size() >= ReactionsRule.MAX_EMOJI_SET) {
+                        Snackbar.make(getRoot(),
+                                "最多选 " + ReactionsRule.MAX_EMOJI_SET + " 个表情",
+                                Snackbar.LENGTH_SHORT).show();
+                        return;
+                    }
+                    tokens.add(emoji);
+                }
+                target.setText(String.join(" ", tokens));
+                target.setSelection(target.getText().length());
+                refreshToggleHighlights(row, target);
+            });
+            row.addView(btn);
+        }
+        Button clear = new Button(this);
+        clear.setText("✖ 全清");
+        clear.setAllCaps(false);
+        clear.setOnClickListener(v -> {
+            target.setText("");
+            refreshToggleHighlights(row, target);
+        });
+        row.addView(clear);
+        refreshToggleHighlights(row, target);
+        return row;
+    }
+
+    /** 负面表情单选行：点击写入输入框，附"清除" */
+    private LinearLayout buildEmojiPickRow(EditText target) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        for (String emoji : QUICK_EMOJIS) {
+            Button btn = new Button(this);
+            btn.setText(emoji);
+            btn.setAllCaps(false);
+            btn.setMinWidth(dp(44));
+            btn.setPadding(0, 0, 0, 0);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.setMarginEnd(dp(4));
+            btn.setLayoutParams(lp);
+            btn.setOnClickListener(v -> target.setText(emoji));
+            row.addView(btn);
+        }
+        Button clear = new Button(this);
+        clear.setText("✖ 清除");
+        clear.setAllCaps(false);
+        clear.setOnClickListener(v -> target.setText(""));
+        row.addView(clear);
+        return row;
+    }
+
+    private void refreshToggleHighlights(LinearLayout row, EditText target) {
+        List<String> tokens = parseEmojiTokens(target.getText().toString());
+        for (int i = 0; i < row.getChildCount(); i++) {
+            View c = row.getChildAt(i);
+            if (c.getTag() instanceof String) {
+                c.setAlpha(tokens.contains((String) c.getTag()) ? 1f : 0.45f);
+            }
+        }
+    }
+
+    /** 横向滚动容器，防止表情按钮行在窄屏溢出 */
+    private android.widget.HorizontalScrollView wrapHorizontal(View child) {
+        android.widget.HorizontalScrollView hsv = new android.widget.HorizontalScrollView(this);
+        hsv.setHorizontalScrollBarEnabled(false);
+        hsv.addView(child);
+        return hsv;
+    }
+
+    private static int parseIntOr(String s, int def) {
+        try {
+            return Integer.parseInt(s.trim());
+        } catch (Throwable t) {
+            return def;
+        }
+    }
+
+    private static int dp(int value) {
+        return (int) (android.content.res.Resources.getSystem().getDisplayMetrics().density
+                * value + 0.5f);
+    }
+
+    // ═════════════════════════════════════════════
     // 表情筛选检索深度（全局默认）
     // ═════════════════════════════════════════════
 
@@ -625,6 +1006,11 @@ public class SettingsActivity extends AppCompatActivity {
             vh.textBadge.setText(badges.isEmpty() ? "点按配置 ›" : String.join(" · ", badges));
 
             vh.itemView.setOnClickListener(v -> showChannelRuleSetsDialog(ch));
+            // 长按 = 表情过滤规则编辑（进频道前配置；TG 内列表长按 ⋮ 也可配）
+            vh.itemView.setOnLongClickListener(v -> {
+                showReactionsRuleEditor(ch);
+                return true;
+            });
         }
 
         class ViewHolder extends RecyclerView.ViewHolder {

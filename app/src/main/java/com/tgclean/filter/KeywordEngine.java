@@ -270,9 +270,12 @@ public class KeywordEngine {
      * 应用每频道表情规则。
      * 白名单模式：达标 → 显示（false），不达标 → 过滤（true）。
      * 黑名单模式：达标 → 过滤（true），不达标 → 显示（false）。
+     * 目标计数：emojiSet 非空 → 集合内各 emoji 计数之和；否则单 emoji。
      */
     private boolean applyReactionsRule(Object reactions, ReactionsRule rule) {
-        int likeCount = countReaction(reactions, rule.emoji);
+        int likeCount = rule.hasEmojiSet()
+                ? countReactionsSum(reactions, rule.emojiSetList())
+                : countReaction(reactions, rule.emoji);
         if (rule.whitelistMode) {
             if (likeCount < rule.minCount) return true;             // 正面不达标 → 隐藏
             if (rule.hasEmoji2()
@@ -331,6 +334,58 @@ public class KeywordEngine {
     /** 去掉 U+FE0F（VARIATION SELECTOR-16），用于表情字符串归一化比较 */
     static String stripFe0f(String s) {
         return s == null ? "" : s.replace("\uFE0F", "");
+    }
+
+    /**
+     * 多表情求和：统计一组标准 emoji 的 reaction 计数之和。
+     * 单趟遍历 results，命中集合任一 emoji（FE0F 归一化后比较）即累加，
+     * 未命中的条目不计（与单表情版 countReaction 同一套反射与容错）。
+     */
+    private static int countReactionsSum(Object reactions, java.util.List<String> emojis) {
+        if (reactions == null || emojis == null || emojis.isEmpty()) return 0;
+        java.util.HashSet<String> targets = new java.util.HashSet<>(emojis.size() * 4);
+        for (String e : emojis) {
+            if (e == null || e.isEmpty()) continue;
+            targets.add(e);            // 原串（含 FE0F 形态）
+            targets.add(stripFe0f(e)); // 归一化形态
+        }
+        if (targets.isEmpty()) return 0;
+        int sum = 0;
+        try {
+            Field resultsField = cachedField(reactions.getClass(), "results");
+            if (resultsField == null) return 0;
+            Object results = resultsField.get(reactions);
+            if (!(results instanceof List)) return 0;
+
+            for (Object reactionCount : (List<?>) results) {
+                if (reactionCount == null) continue;
+                Class<?> rcClass = reactionCount.getClass();
+
+                Field reactionField = cachedField(rcClass, "reaction");
+                if (reactionField == null) continue;
+                Object reaction = reactionField.get(reactionCount);
+                if (reaction == null) continue;
+
+                // 同 countReaction：沿继承链找 emoticon 字符串字段，
+                // 自定义表情（只有 document_id）自然跳过
+                Field emoticonField = cachedField(reaction.getClass(), "emoticon");
+                if (emoticonField == null) continue;
+                Object emoticonObj = emoticonField.get(reaction);
+                if (!(emoticonObj instanceof String)) continue;
+                String emoticon = (String) emoticonObj;
+
+                if (!targets.contains(emoticon)
+                        && !targets.contains(stripFe0f(emoticon))) {
+                    continue;
+                }
+
+                Field countField = cachedField(rcClass, "count");
+                if (countField == null) continue;
+                sum += countField.getInt(reactionCount);
+            }
+        } catch (Throwable ignored) {
+        }
+        return sum;
     }
 
     // ═════════════════════════════════════════════

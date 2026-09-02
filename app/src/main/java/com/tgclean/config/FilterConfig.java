@@ -244,6 +244,7 @@ public class FilterConfig {
                 rule.emoji2 = r.optString("emoji2", "");
                 rule.maxCount = r.optInt("maxCount", 0);
                 rule.maxDepth = r.optInt("maxDepth", 0);
+                rule.emojiSet = r.optString("emojiSet", ""); // 新版字段，旧数据缺失回落单 emoji
                 try {
                     result.put(Long.parseLong(key), rule);
                 } catch (NumberFormatException ignored) {}
