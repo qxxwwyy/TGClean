@@ -125,6 +125,7 @@ app/src/main/res/layout/
 5. 上一轮 PR 合并后，新一轮开发重新建 PR 作为 CI 载体（直接 push 裸分支不触发 CI）
 
 ## 发布规则
+- **签名(2026-09-02 定案)**:全新密钥只存 GitHub Secrets(`TGCLEAN_KS_B64`=keystore 的 base64,`TGCLEAN_KS_PASS`=密码),build.yml/release.yml 均有解码注入步骤;**私钥原件与密码存于 K70 `/home/ubuntu/tgclean-signing/`(600 权限,须纳入备份,丢失=换签名全员重装)**。Secrets 缺失时 build.yml 会黄字警告并回落 debug 签名(临时 runner 密钥,产物不可覆盖安装,视为 CI 红灯处理)。旧 v2.0.2 keystore+密码已随公开 git 历史永久泄露(d3c71fc 可提取),正式签名自 2026-09-02 起换新钥,升级需卸载重装一次。
 - **只有用户明确说明"正式版本"时才发布 GitHub Release**
 - 其余所有修改：push → CI 构建 → 发 APK 到 Telegram 测试，**不创建 Release**
 - 正式发布流程（v2.0.0 起）：feature 分支审计通过 → 合并 PR 进 main → 打 `v*` tag → release.yml 自动构建 release APK 并**原样 .apk 直传** GitHub Release（不打包 zip）；build.yml 在每次 push/PR 同时构建 debug+release 验证 R8 路径

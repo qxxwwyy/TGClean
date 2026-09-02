@@ -22,6 +22,21 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      # 从 Secrets 恢复签名密钥（与 release.yml 同源：TGCLEAN_KS_B64 / TGCLEAN_KS_PASS）。
+      # 缺失时不阻断构建（debug 签名兜底），但大声警告——临时 runner 每次生成
+      # 不同的 debug 密钥，产物互相无法覆盖安装（2026-09-02 用户实测踩坑）。
+      - name: Decode signing keystore
+        env:
+          KS_B64: ${{ secrets.TGCLEAN_KS_B64 }}
+          KS_PASS: ${{ secrets.TGCLEAN_KS_PASS }}
+        run: |
+          if [ -n "$KS_B64" ] && [ -n "$KS_PASS" ]; then
+            echo "$KS_B64" | base64 -d > app/release.keystore
+            echo "TGCLEAN_KS_PASS=$KS_PASS" >> "$GITHUB_ENV"
+          else
+            echo "::warning::TGCLEAN_KS_B64 / TGCLEAN_KS_PASS secrets not set — APK will be debug-signed by an ephemeral runner key and NOT installable over previous builds!"
+          fi
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug
 
