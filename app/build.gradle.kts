@@ -4,15 +4,16 @@ plugins {
 
 android {
     namespace = "com.tgclean"
-    compileSdk = 36
-    buildToolsVersion = "36.0.0"
+    // libxposed api/service 102.0.0 AAR 声明 minCompileSdk=37,compileSdk 必须同步上调
+    compileSdk = 37
+    buildToolsVersion = "37.0.0"
 
     defaultConfig {
         applicationId = "com.tgclean"
         minSdk = 28
         targetSdk = 36
-        versionCode = 20
-        versionName = "2.0.2"
+        versionCode = 21
+        versionName = "2.1.0"
     }
 
     signingConfigs {

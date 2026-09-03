@@ -177,6 +177,7 @@ public class KeywordFilterHook {
                                 int instanceGuid = getIntFieldValue(
                                         chatActivity.getClass(), chatActivity, "classGuid");
                                 owner = instanceGuid == reqGuid;
+                                if (instanceGuid == 0) warnGuidReflectionFailure(module);
                             }
 
                             if (owner) {
@@ -296,6 +297,16 @@ public class KeywordFilterHook {
         if (oldestSeenAnchor.size() > 200) oldestSeenAnchor.clear();
     }
 
+    /** classGuid 反射失败（恒 0）会让 guid 门控把整条过滤静默禁用——限频 WARN 供排障 */
+    private static volatile long lastGuidWarnAt;
+    private static void warnGuidReflectionFailure(XposedModule module) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - lastGuidWarnAt < 60_000) return;
+        lastGuidWarnAt = now;
+        module.log(Log.WARN, TAG, "classGuid reflection returned 0 — filtering gated off"
+                + " (owner check fails), possible TG version drift");
+    }
+
     /**
      * 零过滤的健康批次（与 maybeCascade 内的健康分支同语义）：
      * 解除单飞、续期看门狗、撤下检索徽标、批次范围并入锚点。
@@ -392,9 +403,9 @@ public class KeywordFilterHook {
             if (batchMin <= 0) return;
 
             int guid = guidObj;
-            Integer prev = oldestSeenAnchor.put(guid, batchMin);
-            int frontier = Math.min(batchMin, prev == null ? batchMin : prev);
-            oldestSeenAnchor.put(guid, frontier);
+            // 先读旧值判推进，再原子 min-merge（主线程单写者，读-并窗口无害）
+            Integer prev = oldestSeenAnchor.get(guid);
+            int frontier = oldestSeenAnchor.merge(guid, batchMin, Math::min);
             if (prev != null && frontier >= prev) {
                 // 未推进：TG 空视图重取的最新窗口 / 重复请求的回包。
                 // 直接忽略——不发起、不计数（v28 的 stuck 螺旋死因，

@@ -61,6 +61,8 @@ public class ReactionsRule {
 
     /** emojiSet 允许的最大表情数（弹窗快速选择+手输的合法性上界） */
     public static final int MAX_EMOJI_SET = 6;
+    /** 单个 emoji 字符串允许的最大码点数（sanitize 与双端 token 解析共用） */
+    public static final int MAX_EMOJI_CODEPOINTS = 16;
 
     public boolean hasEmoji2() {
         return emoji2 != null && !emoji2.isEmpty();
@@ -71,14 +73,22 @@ public class ReactionsRule {
         return emojiSet != null && !emojiSet.trim().isEmpty();
     }
 
-    /** 把 emojiSet 拆成表情列表（去空白），无效/空集返回空列表 */
+    // 热路径缓存：引擎对每条消息调用 emojiSetList()，规则对象在快照重建时
+    // 整体替换（引擎侧永不失效）；写路径改动 emojiSet 后经 sanitize() 失效
+    private transient java.util.List<String> emojiSetCache;
+
+    /** 把 emojiSet 拆成表情列表（去空白），无效/空集返回空列表（结果勿改动） */
     public java.util.List<String> emojiSetList() {
         if (!hasEmojiSet()) return java.util.Collections.emptyList();
-        java.util.List<String> out = new java.util.ArrayList<>();
-        for (String t : emojiSet.trim().split("\\s+")) {
-            if (!t.isEmpty()) out.add(t);
+        java.util.List<String> c = emojiSetCache;
+        if (c == null) {
+            c = new java.util.ArrayList<>();
+            for (String t : emojiSet.trim().split("\\s+")) {
+                if (!t.isEmpty()) c.add(t);
+            }
+            emojiSetCache = c;
         }
-        return out;
+        return c;
     }
 
     /** 达标目标的展示形态：多表情 "❤️+👍"，单表情 "❤️"；均无效返回空串 */
@@ -101,12 +111,12 @@ public class ReactionsRule {
         if (emoji == null) emoji = "";
         if (emoji2 == null) emoji2 = "";
         if (emojiSet == null) emojiSet = "";
-        if (emoji.codePointCount(0, emoji.length()) > 16) emoji = "";
-        if (emoji2.codePointCount(0, emoji2.length()) > 16) emoji2 = "";
+        if (emoji.codePointCount(0, emoji.length()) > MAX_EMOJI_CODEPOINTS) emoji = "";
+        if (emoji2.codePointCount(0, emoji2.length()) > MAX_EMOJI_CODEPOINTS) emoji2 = "";
         if (hasEmojiSet()) {
             java.util.LinkedHashSet<String> uniq = new java.util.LinkedHashSet<>();
             for (String t : emojiSetList()) {
-                if (t.codePointCount(0, t.length()) > 16) continue; // 超长项直接丢弃
+                if (t.codePointCount(0, t.length()) > MAX_EMOJI_CODEPOINTS) continue; // 超长项直接丢弃
                 uniq.add(t);
                 if (uniq.size() >= MAX_EMOJI_SET) break;
             }
@@ -114,19 +124,87 @@ public class ReactionsRule {
         } else {
             emojiSet = "";
         }
+        emojiSetCache = null; // emojiSet 可能已被改写，失效缓存
         if (minCount < 0) minCount = 0;
         if (maxCount < 0) maxCount = 0;
         maxDepth = clampDepth(maxDepth);
     }
 
+    // ═════════════════════════════════════════════
+    // 跨进程契约（单一来源）：JSON 键与 Intent extras 键只在此处定义。
+    // 读端容忍缺失键（optX 默认值），写端总是全量输出——旧版读到新键忽略、
+    // 新版读到旧数据回落默认，双向兼容。
+    // ═════════════════════════════════════════════
+
+    public org.json.JSONObject toJSONObject() throws org.json.JSONException {
+        org.json.JSONObject r = new org.json.JSONObject();
+        r.put("enabled", enabled);
+        r.put("whitelist", whitelistMode);
+        r.put("emoji", emoji != null ? emoji : "");
+        r.put("minCount", minCount);
+        r.put("emoji2", emoji2 != null ? emoji2 : "");
+        r.put("maxCount", maxCount);
+        r.put("maxDepth", maxDepth);
+        r.put("emojiSet", emojiSet != null ? emojiSet : "");
+        return r;
+    }
+
+    public static ReactionsRule fromJSONObject(org.json.JSONObject r) {
+        ReactionsRule rule = new ReactionsRule();
+        rule.enabled = r.optBoolean("enabled", false);
+        rule.whitelistMode = r.optBoolean("whitelist", true);
+        rule.emoji = r.optString("emoji", "");
+        rule.minCount = r.optInt("minCount", 0);
+        rule.emoji2 = r.optString("emoji2", "");
+        rule.maxCount = r.optInt("maxCount", 0);
+        rule.maxDepth = r.optInt("maxDepth", 0);
+        rule.emojiSet = r.optString("emojiSet", ""); // 新版字段，旧数据缺失回落单 emoji
+        return rule;
+    }
+
+    /** 规则字段写入 intent（不含 dialog_id/token/nonce 等传输控制字段） */
+    public android.content.Intent toIntent(android.content.Intent intent) {
+        intent.putExtra("enabled", enabled);
+        intent.putExtra("whitelist", whitelistMode);
+        intent.putExtra("emoji", emoji != null ? emoji : "");
+        intent.putExtra("emoji_set", emojiSet != null ? emojiSet : "");
+        intent.putExtra("min_count", minCount);
+        intent.putExtra("emoji2", emoji2 != null ? emoji2 : "");
+        intent.putExtra("max_count", maxCount);
+        intent.putExtra("max_depth", maxDepth); // 0 = 跟随全局默认
+        return intent;
+    }
+
+    public static ReactionsRule fromIntent(android.content.Intent i) {
+        ReactionsRule rule = new ReactionsRule();
+        rule.enabled = i.getBooleanExtra("enabled", false);
+        rule.whitelistMode = i.getBooleanExtra("whitelist", true);
+        rule.emoji = i.getStringExtra("emoji");
+        rule.emojiSet = i.getStringExtra("emoji_set");
+        rule.minCount = i.getIntExtra("min_count", 0);
+        rule.emoji2 = i.getStringExtra("emoji2");
+        rule.maxCount = i.getIntExtra("max_count", 0);
+        rule.maxDepth = i.getIntExtra("max_depth", 0);
+        if (rule.emoji == null) rule.emoji = "";
+        if (rule.emoji2 == null) rule.emoji2 = "";
+        if (rule.emojiSet == null) rule.emojiSet = "";
+        return rule;
+    }
+
     /** 菜单/徽标用的简短描述，如 "❤️+👍≥10·👎≤20·白" */
     public String describe() {
         if (!enabled || !hasTarget()) return "关";
-        StringBuilder sb = new StringBuilder(describeTarget()).append("≥").append(minCount);
-        if (whitelistMode && hasEmoji2()) {
+        return formatRule(whitelistMode, describeTarget(), minCount, emoji2, maxCount);
+    }
+
+    /** 规则格式化（单一来源）：目标标签形如 "❤️+👍"（多表情合计）或 "❤️" */
+    public static String formatRule(boolean whitelist, String targetLabel, int minCount,
+                                    String emoji2, int maxCount) {
+        StringBuilder sb = new StringBuilder(targetLabel).append("≥").append(minCount);
+        if (whitelist && emoji2 != null && !emoji2.isEmpty()) {
             sb.append("·").append(emoji2).append("≤").append(maxCount);
         }
-        sb.append(whitelistMode ? "·只显" : "·隐藏");
+        sb.append(whitelist ? "·只显" : "·隐藏");
         return sb.toString();
     }
 

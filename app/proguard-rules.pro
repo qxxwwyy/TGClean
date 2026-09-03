@@ -16,6 +16,14 @@
 # libxposed API 为 compileOnly 依赖，不在运行时 classpath，R8 需忽略其引用
 -dontwarn io.github.libxposed.api.**
 
+# API 102 起官方 AAR 不再携带模块侧混淆规则（101 AAR 会自动注入），以下自行维护：
+# java_init.list 内容随类名适配 + 保留 XposedModule 子类无参构造 + annotation 包忽略
+-adaptresourcefilecontents META-INF/xposed/java_init.list
+-keep public class * extends io.github.libxposed.api.XposedModule {
+    public <init>();
+}
+-dontwarn io.github.libxposed.annotation.**
+
 # Material / AppCompat 传递依赖中的可选引用
 -dontwarn com.google.android.material.**
 -dontwarn androidx.appcompat.**

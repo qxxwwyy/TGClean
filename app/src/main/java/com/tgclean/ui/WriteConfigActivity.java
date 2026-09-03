@@ -38,19 +38,7 @@ public class WriteConfigActivity extends Activity {
 
         Intent intent = getIntent();
         long dialogId = intent.getLongExtra("dialog_id", 0);
-
-        ReactionsRule rule = new ReactionsRule();
-        rule.enabled = intent.getBooleanExtra("enabled", false);
-        rule.whitelistMode = intent.getBooleanExtra("whitelist", true);
-        rule.emoji = intent.getStringExtra("emoji");
-        rule.minCount = intent.getIntExtra("min_count", 0);
-        rule.emoji2 = intent.getStringExtra("emoji2");
-        rule.maxCount = intent.getIntExtra("max_count", 0);
-        rule.maxDepth = intent.getIntExtra("max_depth", 0); // 0 = 跟随全局默认（审计 F-1）
-        rule.emojiSet = intent.getStringExtra("emoji_set");
-        if (rule.emoji == null) rule.emoji = "";
-        if (rule.emoji2 == null) rule.emoji2 = "";
-        if (rule.emojiSet == null) rule.emojiSet = "";
+        ReactionsRule rule = ReactionsRule.fromIntent(intent);
 
         if (dialogId == 0) {
             finish();

@@ -206,11 +206,6 @@ public class KeywordEngine {
         return false;
     }
 
-    /** 兼容保留：仅关键词匹配 */
-    public boolean shouldFilter(String text, long dialogId) {
-        return shouldFilter(text, dialogId, null);
-    }
-
     private boolean matchRuleSetKeywords(String text, FilterConfig.RuleSet rs,
                                          Map<String, List<Pattern>> patternCache) {
         if (rs.useRegex) {
@@ -247,9 +242,27 @@ public class KeywordEngine {
     private static final java.util.concurrent.ConcurrentHashMap<String, Field> fieldCache =
             new java.util.concurrent.ConcurrentHashMap<>();
 
+    /** 查找失败的负缓存哨兵：永久缺失的字段（如自定义表情无 emoticon）每条消息
+     *  都会重走继承链并抛 NoSuchFieldException——缓存 null 结果砍掉这笔热路径开销 */
+    private static final Field NO_FIELD;
+    static {
+        try {
+            NO_FIELD = KeywordEngine.class.getDeclaredField("NO_FIELD");
+            NO_FIELD.setAccessible(true);
+        } catch (Throwable t) {
+            throw new AssertionError(t);
+        }
+    }
+
     private static Field cachedField(Class<?> clazz, String name) {
-        return fieldCache.computeIfAbsent(clazz.getName() + "#" + name,
-                k -> findFieldInHierarchy(clazz, name));
+        String key = clazz.getName() + "#" + name;
+        Field f = fieldCache.get(key);
+        if (f == null) {
+            Field found = findFieldInHierarchy(clazz, name);
+            f = found != null ? found : NO_FIELD;
+            fieldCache.put(key, f);
+        }
+        return f == NO_FIELD ? null : f;
     }
 
     private static Field findFieldInHierarchy(Class<?> clazz, String name) {
@@ -343,19 +356,22 @@ public class KeywordEngine {
      */
     private static int countReactionsSum(Object reactions, java.util.List<String> emojis) {
         if (reactions == null || emojis == null || emojis.isEmpty()) return 0;
-        java.util.HashSet<String> targets = new java.util.HashSet<>(emojis.size() * 4);
-        for (String e : emojis) {
-            if (e == null || e.isEmpty()) continue;
-            targets.add(e);            // 原串（含 FE0F 形态）
-            targets.add(stripFe0f(e)); // 归一化形态
-        }
-        if (targets.isEmpty()) return 0;
         int sum = 0;
         try {
             Field resultsField = cachedField(reactions.getClass(), "results");
             if (resultsField == null) return 0;
             Object results = resultsField.get(reactions);
-            if (!(results instanceof List)) return 0;
+            if (!(results instanceof List) || ((List<?>) results).isEmpty()) return 0;
+
+            // 结果非空才构建目标集合（无 reactions 的消息是大头，省掉每次的
+            // HashSet 构建与 FE0F 归一化分配）
+            java.util.HashSet<String> targets = new java.util.HashSet<>(emojis.size() * 4);
+            for (String e : emojis) {
+                if (e == null || e.isEmpty()) continue;
+                targets.add(e);            // 原串（含 FE0F 形态）
+                targets.add(stripFe0f(e)); // 归一化形态
+            }
+            if (targets.isEmpty()) return 0;
 
             for (Object reactionCount : (List<?>) results) {
                 if (reactionCount == null) continue;

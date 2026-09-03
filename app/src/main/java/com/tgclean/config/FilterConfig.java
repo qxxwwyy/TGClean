@@ -8,7 +8,6 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -236,15 +235,7 @@ public class FilterConfig {
                 String key = keys.next();
                 JSONObject r = obj.optJSONObject(key);
                 if (r == null) continue;
-                ReactionsRule rule = new ReactionsRule();
-                rule.enabled = r.optBoolean("enabled", false);
-                rule.whitelistMode = r.optBoolean("whitelist", true);
-                rule.emoji = r.optString("emoji", "");
-                rule.minCount = r.optInt("minCount", 0);
-                rule.emoji2 = r.optString("emoji2", "");
-                rule.maxCount = r.optInt("maxCount", 0);
-                rule.maxDepth = r.optInt("maxDepth", 0);
-                rule.emojiSet = r.optString("emojiSet", ""); // 新版字段，旧数据缺失回落单 emoji
+                ReactionsRule rule = ReactionsRule.fromJSONObject(r);
                 try {
                     result.put(Long.parseLong(key), rule);
                 } catch (NumberFormatException ignored) {}

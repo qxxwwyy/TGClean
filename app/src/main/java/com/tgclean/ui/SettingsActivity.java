@@ -35,6 +35,7 @@ import com.tgclean.App;
 import com.tgclean.R;
 import com.tgclean.config.FilterConfigWriter;
 import com.tgclean.config.ReactionsRule;
+import com.tgclean.config.ReactionsUi;
 import com.tgclean.receiver.ChannelReceiver;
 
 import org.json.JSONObject;
@@ -426,8 +427,6 @@ public class SettingsActivity extends AppCompatActivity {
     // remote prefs——无需广播/令牌/回执链）
     // ═════════════════════════════════════════════
 
-    private static final String[] QUICK_EMOJIS = {"👍", "👎", "❤️", "🔥", "🥰", "😂", "🤩", "💯"};
-
     private void showReactionsRuleEditor(ChannelSummary ch) {
         if (writer == null) {
             Snackbar.make(getRoot(), "LSPosed 服务未就绪", Snackbar.LENGTH_LONG).show();
@@ -479,32 +478,13 @@ public class SettingsActivity extends AppCompatActivity {
         root.addView(editMax);
 
         root.addView(sectionLabel("检索深度（筛选后剩太少时，自动向前翻找的范围）"));
-        final int customIdx = ReactionsRule.DEPTH_PRESETS.length + 1;
-        final String[] depthChoices = new String[ReactionsRule.DEPTH_PRESETS.length + 2];
-        depthChoices[0] = "跟随全局默认（当前 "
-                + ReactionsRule.formatDepth(writer.getReactionsSearchDepth()) + " 条）";
-        for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
-            depthChoices[i + 1] = ReactionsRule.formatDepth(ReactionsRule.DEPTH_PRESETS[i]) + " 条";
-        }
-        depthChoices[customIdx] = "自定义…";
-        int presetIdx = 0;
-        int prefillCustom = 0;
-        if (current != null && current.maxDepth > 0) {
-            for (int i = 0; i < ReactionsRule.DEPTH_PRESETS.length; i++) {
-                if (ReactionsRule.DEPTH_PRESETS[i] == current.maxDepth) {
-                    presetIdx = i + 1;
-                    break;
-                }
-            }
-            if (presetIdx == 0) {
-                presetIdx = customIdx;
-                prefillCustom = current.maxDepth;
-                depthChoices[customIdx] = "自定义（"
-                        + ReactionsRule.formatDepth(current.maxDepth) + " 条）";
-            }
-        }
-        final int[] selectedDepth = {presetIdx};
-        final int[] customDepth = {prefillCustom};
+        // 档位构建/预填单一来源（ReactionsUi），与 TG 内弹窗逐字节一致
+        ReactionsUi.DepthChoices built = ReactionsUi.buildDepthChoices(
+                writer.getReactionsSearchDepth(), current != null ? current.maxDepth : 0);
+        final int customIdx = built.customIdx;
+        final String[] depthChoices = built.labels;
+        final int[] selectedDepth = {built.preselect};
+        final int[] customDepth = {built.prefillCustom};
         // 与 TG 内弹窗同款：吞掉程序化 setSelection 的首个异步回调，
         // 避免预填自定义档时弹窗一打开就弹输入框
         final boolean[] spinnerReady = {false};
@@ -525,7 +505,7 @@ public class SettingsActivity extends AppCompatActivity {
             }
             @Override public void onNothingSelected(AdapterView<?> p) {}
         });
-        depthSpinner.setSelection(presetIdx);
+        depthSpinner.setSelection(built.preselect);
         root.addView(depthSpinner);
 
         // 预填当前规则
@@ -572,11 +552,11 @@ public class SettingsActivity extends AppCompatActivity {
                 .setOnClickListener(v -> {
                     boolean enabled = checkEnabled.isChecked();
                     boolean whitelist = radioWhite.isChecked();
-                    List<String> targets = parseEmojiTokens(editEmoji.getText().toString());
+                    List<String> targets = ReactionsUi.parseEmojiTokens(editEmoji.getText().toString());
                     String emoji2 = editEmoji2.isEnabled()
                             ? editEmoji2.getText().toString().trim() : "";
-                    int minCount = parseIntOr(editMin.getText().toString(), -1);
-                    int maxCount = parseIntOr(editMax.getText().toString(), -1);
+                    int minCount = ReactionsUi.parseIntOr(editMin.getText().toString(), -1);
+                    int maxCount = ReactionsUi.parseIntOr(editMax.getText().toString(), -1);
 
                     if (enabled) {
                         if (targets.isEmpty()) {
@@ -650,18 +630,13 @@ public class SettingsActivity extends AppCompatActivity {
                 .setTitle("自定义检索深度（条）")
                 .setView(input)
                 .setPositiveButton("确定", (d, w) -> {
-                    String t = input.getText().toString().trim();
-                    int v;
-                    try {
-                        v = Integer.parseInt(t);
-                    } catch (NumberFormatException e) {
-                        v = t.matches("\\d{10,}") ? ReactionsRule.MAX_DEPTH : -1;
-                    }
+                    int v = ReactionsUi.parseCustomDepthInput(
+                            input.getText().toString().trim());
                     if (v <= 0) {
                         Snackbar.make(getRoot(), "请输入正整数", Snackbar.LENGTH_SHORT).show();
                         return;
                     }
-                    customDepth[0] = ReactionsRule.clampDepth(v);
+                    customDepth[0] = v;
                     depthChoices[customIdx] = "自定义（"
                             + ReactionsRule.formatDepth(customDepth[0]) + " 条）";
                     adapter.notifyDataSetChanged();
@@ -677,23 +652,11 @@ public class SettingsActivity extends AppCompatActivity {
         return tv;
     }
 
-    /** 拆分空格/逗号分隔的表情 token（去重保序、过滤超长项） */
-    private static List<String> parseEmojiTokens(String s) {
-        List<String> out = new ArrayList<>();
-        if (s == null) return out;
-        for (String t : s.trim().split("[\\s,，]+")) {
-            if (t.isEmpty()) continue;
-            if (t.codePointCount(0, t.length()) > 16) continue;
-            if (!out.contains(t)) out.add(t);
-        }
-        return out;
-    }
-
     /** 目标表情多选行：点击切换输入框集合中的选中态（选中高亮），附"全清" */
     private LinearLayout buildEmojiToggleRow(EditText target) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        for (String emoji : QUICK_EMOJIS) {
+        for (String emoji : ReactionsUi.QUICK_EMOJIS) {
             Button btn = new Button(this);
             btn.setText(emoji);
             btn.setAllCaps(false);
@@ -705,7 +668,7 @@ public class SettingsActivity extends AppCompatActivity {
             lp.setMarginEnd(dp(4));
             btn.setLayoutParams(lp);
             btn.setOnClickListener(v -> {
-                List<String> tokens = parseEmojiTokens(target.getText().toString());
+                List<String> tokens = ReactionsUi.parseEmojiTokens(target.getText().toString());
                 if (tokens.contains(emoji)) {
                     tokens.remove(emoji);
                 } else {
@@ -739,7 +702,7 @@ public class SettingsActivity extends AppCompatActivity {
     private LinearLayout buildEmojiPickRow(EditText target) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
-        for (String emoji : QUICK_EMOJIS) {
+        for (String emoji : ReactionsUi.QUICK_EMOJIS) {
             Button btn = new Button(this);
             btn.setText(emoji);
             btn.setAllCaps(false);
@@ -761,7 +724,7 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     private void refreshToggleHighlights(LinearLayout row, EditText target) {
-        List<String> tokens = parseEmojiTokens(target.getText().toString());
+        List<String> tokens = ReactionsUi.parseEmojiTokens(target.getText().toString());
         for (int i = 0; i < row.getChildCount(); i++) {
             View c = row.getChildAt(i);
             if (c.getTag() instanceof String) {
@@ -776,14 +739,6 @@ public class SettingsActivity extends AppCompatActivity {
         hsv.setHorizontalScrollBarEnabled(false);
         hsv.addView(child);
         return hsv;
-    }
-
-    private static int parseIntOr(String s, int def) {
-        try {
-            return Integer.parseInt(s.trim());
-        } catch (Throwable t) {
-            return def;
-        }
     }
 
     private static int dp(int value) {

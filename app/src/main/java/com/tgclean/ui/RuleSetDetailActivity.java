@@ -1,6 +1,5 @@
 package com.tgclean.ui;
 
-import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.util.Log;
@@ -25,7 +24,6 @@ import com.tgclean.App;
 import com.tgclean.R;
 import com.tgclean.config.FilterConfigWriter;
 
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.ArrayList;
@@ -67,6 +65,10 @@ public class RuleSetDetailActivity extends AppCompatActivity {
     private Set<Long> currentChannels = new HashSet<>();
     private List<ChannelItem> allChannels = new ArrayList<>();
     private String lastChannelQuery = "";
+    /** 频道搜索防抖时长（与 SettingsActivity 主页搜索一致） */
+    private static final long SEARCH_DEBOUNCE_MS = 200;
+    private final android.os.Handler searchHandler =
+            new android.os.Handler(android.os.Looper.getMainLooper());
 
     // ─── 控件 ───
     private MaterialToolbar toolbar;
@@ -119,6 +121,7 @@ public class RuleSetDetailActivity extends AppCompatActivity {
         if (serviceReadyListener != null) {
             App.removeServiceReadyListener(serviceReadyListener);
         }
+        searchHandler.removeCallbacksAndMessages(null); // 挂起的防抖搜索可能持 Activity
         super.onDestroy();
     }
 
@@ -147,12 +150,14 @@ public class RuleSetDetailActivity extends AppCompatActivity {
         textChannelCount = findViewById(R.id.text_channel_count);
         editChannelSearch = findViewById(R.id.edit_channel_search);
 
-        // 频道搜索
+        // 频道搜索：200ms 防抖（与主页搜索一致）。列表为 wrap_content +
+        // 禁用滚动回收，每键全量过滤+重绑在千频道级会卡主线程数百毫秒
         editChannelSearch.addTextChangedListener(new android.text.TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
             @Override public void afterTextChanged(android.text.Editable s) {
-                channelAdapter.filter(s.toString().trim());
+                String q = s.toString().trim();
+                searchHandler.postDelayed(() -> channelAdapter.filter(q), SEARCH_DEBOUNCE_MS);
             }
         });
     }
@@ -417,10 +422,12 @@ public class RuleSetDetailActivity extends AppCompatActivity {
     static class ChannelItem {
         final long id;
         final String name;
+        final String lowerName; // 预降名缓存：搜索热路径免每行每键 toLowerCase 分配
 
         ChannelItem(long id, String name) {
             this.id = id;
             this.name = name;
+            this.lowerName = name != null ? name.toLowerCase() : "";
         }
     }
 
@@ -460,7 +467,7 @@ public class RuleSetDetailActivity extends AppCompatActivity {
                 if (lastChannelQuery.isEmpty()) {
                     filteredItems.add(ch);
                 } else {
-                    if (ch.name.toLowerCase().contains(lowerQuery)
+                    if (ch.lowerName.contains(lowerQuery)
                             || String.valueOf(ch.id).contains(lastChannelQuery)) {
                         filteredItems.add(ch);
                     }
