@@ -27,7 +27,12 @@ jobs:
       - name: Decode signing keystore
         env:
           KS_B64: ${{ secrets.TGCLEAN_KS_B64 }}
-        run: echo "$KS_B64" | base64 -d > app/release.keystore
+        run: |
+          if [ -z "$KS_B64" ]; then
+            echo "::error::TGCLEAN_KS_B64 secret not set — cannot sign release APK"
+            exit 1
+          fi
+          echo "$KS_B64" | base64 -d > app/release.keystore
 
       - name: Build Release APK
         env:

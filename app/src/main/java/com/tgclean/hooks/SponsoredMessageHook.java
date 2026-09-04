@@ -3,18 +3,18 @@ package com.tgclean.hooks;
 import android.util.Log;
 
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 
 /**
  * 移除Telegram原生赞助消息（Sponsored Messages）
  *
- * 三个Hook点（参考Killergram + NoAdsTelegram，已验证有效）：
+ * Hook 点（参考Killergram + NoAdsTelegram，已验证有效）：
  * 1. ChatActivity.addSponsoredMessages → null
- * 2. MessagesController.getSponsoredMessages → 空列表
- * 3. MessagesController.getSponsoredMessagesCount → 0
+ * 2. MessagesController.getSponsoredMessages → null
+ * 3. TLRPC$messages_SponsoredMessages.TLdeserialize → null
+ *    （getSponsoredMessagesCount 在 layer 228 已移出 MessagesController，
+ *      原 hook 点随之删除）
  */
 public class SponsoredMessageHook {
     private static final String TAG = "TGClean-Sponsored";
@@ -55,7 +55,12 @@ public class SponsoredMessageHook {
         try {
             Class<?> mcClass = cl.loadClass("org.telegram.messenger.MessagesController");
             Method getMethod = findMethod(mcClass, "getSponsoredMessages");
-            if (getMethod == null) return;
+            if (getMethod == null) {
+                module.log(Log.WARN, TAG, "getSponsoredMessages not found in this TG"
+                        + " version, skipping (addSponsoredMessages / TLdeserialize"
+                        + " hooks still active)");
+                return;
+            }
             module.hook(getMethod).intercept(chain -> {
                 module.log(Log.DEBUG, TAG, "Blocked getSponsoredMessages");
                 // 返回 null：TG 调用方检查 res == null 后直接 return，不展示赞助消息。

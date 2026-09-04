@@ -19,7 +19,7 @@ import org.json.JSONObject;
  *
  * 1. com.tgclean.ACTION_CHANNEL_DISCOVERED — 频道发现
  *    a) 单频道：dialog_id / name / last_seen extras（增量上报）
- *    b) 批量：batch_json extras（首次全量扫描，单个广播携带全部频道）
+ *    b) 批量：batch_json extras（首次全量扫描，按 200 条/广播分片发送，增量合并）
  *    存入本地 SharedPreferences（discovered_channels）。
  *
  * 2. com.tgclean.ACTION_REACTIONS_RULE — 每频道表情过滤规则保存请求
@@ -84,19 +84,12 @@ public class ChannelReceiver extends BroadcastReceiver {
      */
     private void handleReactionsRule(Context context, Intent intent) {
         long dialogId = intent.getLongExtra(EXTRA_DIALOG_ID, 0);
-        if (dialogId == 0) return;
+        if (dialogId == 0) {
+            Log.w(TAG, "Reactions rule broadcast missing dialog_id, dropped");
+            return;
+        }
 
-        ReactionsRule rule = new ReactionsRule();
-        rule.enabled = intent.getBooleanExtra("enabled", false);
-        rule.whitelistMode = intent.getBooleanExtra("whitelist", true);
-        rule.emoji = intent.getStringExtra("emoji");
-        rule.minCount = intent.getIntExtra("min_count", 0);
-        rule.emoji2 = intent.getStringExtra("emoji2");
-        rule.maxCount = intent.getIntExtra("max_count", 0);
-        rule.maxDepth = intent.getIntExtra("max_depth", 0); // 0 = 跟随全局默认
-        if (rule.emoji == null) rule.emoji = "";
-        if (rule.emoji2 == null) rule.emoji2 = "";
-
+        ReactionsRule rule = ReactionsRule.fromIntent(intent);
         submitRuleWrite(context, dialogId, rule,
                 intent.getStringExtra("token"), intent.getStringExtra("nonce"));
     }
