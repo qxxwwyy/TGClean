@@ -791,19 +791,13 @@ public class SettingsActivity extends AppCompatActivity {
                 .setTitle("自定义检索深度（条）")
                 .setView(input)
                 .setPositiveButton("确定", (d, which) -> {
-                    String t = input.getText().toString().trim();
-                    int v;
-                    try {
-                        v = Integer.parseInt(t);
-                    } catch (NumberFormatException e) {
-                        // 超 int 范围的纯数字按上限钳制，非数字才报错（审计 A-2）
-                        v = t.matches("\\d{10,}") ? ReactionsRule.MAX_DEPTH : -1;
-                    }
+                    int v = ReactionsUi.parseCustomDepthInput(
+                            input.getText().toString().trim());
                     if (v <= 0) {
                         Snackbar.make(getRoot(), "请输入正整数", Snackbar.LENGTH_SHORT).show();
                         return;
                     }
-                    applyDepth(ReactionsRule.clampDepth(v));
+                    applyDepth(v);
                 })
                 .setNegativeButton("取消", null)
                 .show();

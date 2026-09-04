@@ -2,9 +2,8 @@
 
 ## 项目状态
 - **仓库**: https://github.com/qxxwwyy/TGClean
-- **正式版本**: v1.0.0、v2.0.0、v2.0.2（tag 触发 release.yml，APK 直传 Release）
-- **最新版本**: v2.0.2（级联额度单调化修复"从头再扫"/僵尸链治理/深度默认500+自定义输入，versionCode 20）
-- **构建**: GitHub Actions CI（ubuntu-latest + JDK 17），服务器 ARM64 无法本地构建
+- **正式版本**: v1.0.0、v2.0.0、v2.0.2、**v2.1.0（2026-09-03，多表情合计/进频道前配置/自动重进/徽标治理/API 102，versionCode 21）**（tag 触发 release.yml，APK 直传 Release）
+- **构建**: GitHub Actions CI（ubuntu-latest + JDK 17 + AGP 9.2.1 + Gradle 9.4.1），服务器 ARM64 无法本地构建
 - **测试设备**: Android 16，官方 Telegram（MIUI）
 
 ## 架构概述

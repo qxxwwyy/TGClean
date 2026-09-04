@@ -117,6 +117,7 @@ public class ReactionsRule {
             java.util.LinkedHashSet<String> uniq = new java.util.LinkedHashSet<>();
             for (String t : emojiSetList()) {
                 if (t.codePointCount(0, t.length()) > MAX_EMOJI_CODEPOINTS) continue; // 超长项直接丢弃
+                if (t.replace("\uFE0F", "").isEmpty()) continue; // 纯变体符永不匹配
                 uniq.add(t);
                 if (uniq.size() >= MAX_EMOJI_SET) break;
             }

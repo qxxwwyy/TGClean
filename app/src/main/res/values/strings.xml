@@ -9,6 +9,6 @@
 
     <!-- LSPosed 服务等待层 -->
     <string name="waiting_service">正在连接 LSPosed 服务…</string>
-    <string name="waiting_service_timeout">未连接到 LSPosed 服务。请依次检查：\n1. 已安装支持 libxposed API 101 的 LSPosed\n2. 已在 LSPosed 中启用 TGClean 模块\n3. 作用域已勾选 Telegram\n4. 强制重启 Telegram 和 TGClean 后点「重试」</string>
+    <string name="waiting_service_timeout">未连接到 LSPosed 服务。请依次检查：\n1. 已安装支持 libxposed API 101+ 的 LSPosed\n2. 已在 LSPosed 中启用 TGClean 模块\n3. 作用域已勾选 Telegram\n4. 强制重启 Telegram 和 TGClean 后点「重试」</string>
     <string name="retry">重试</string>
 </resources>

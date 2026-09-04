@@ -313,6 +313,11 @@ public class ChatHelperHook {
 
             long dialogId = getDialogId(chatActivity, cl);
             if (dialogId == 0) return;
+            if (dialogId > 0) {
+                // 私聊/用户会话：无频道语义可配置，标记已处理避免每次 onResume 重试
+                View.class.cast(headerItem).setTag(TAG_INJECTED);
+                return;
+            }
 
             int accountIdx = getCurrentAccount(chatActivity, cl);
             String channelName = resolveChannelName(dialogId, accountIdx, cl);
@@ -742,6 +747,7 @@ public class ChatHelperHook {
             editMin.setText("10");
             editMax.setText("20");
         }
+        refreshToggleRow(toggleRow, editEmoji); // 预填后同步快速选择行高亮
 
         // 模式切换时启停负面表情区
         final View[] section2 = {label2, editEmoji2, editMax, row2};

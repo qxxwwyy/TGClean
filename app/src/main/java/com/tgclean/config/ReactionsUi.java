@@ -27,6 +27,8 @@ public final class ReactionsUi {
         for (String t : s.trim().split("[\\s,，]+")) {
             if (t.isEmpty()) continue;
             if (t.codePointCount(0, t.length()) > ReactionsRule.MAX_EMOJI_CODEPOINTS) continue;
+            // 纯 FE0F 变体符等剥除归一化后为空的 token 永远无法匹配,直接拒绝
+            if (t.replace("\uFE0F", "").isEmpty()) continue;
             if (!out.contains(t)) out.add(t);
         }
         return out;
